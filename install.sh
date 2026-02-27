@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHOICE_FILE="${ROOT_DIR}/.install_manager"
+CONDA_ENV_FILE="${ROOT_DIR}/.install_conda_env"
 PYTHON_VERSION="3.11"
 CONDA_ENV_NAME="srtgo-env"
 MANAGER=""
@@ -126,6 +127,9 @@ setup_conda() {
 
   log "Installing Playwright Firefox browser"
   conda run -n "${CONDA_ENV_NAME}" python -m playwright install firefox
+
+  printf '%s\n' "${CONDA_ENV_NAME}" > "${CONDA_ENV_FILE}"
+  log "Saved conda environment name: ${CONDA_ENV_NAME}"
 
   cat <<EOF
 

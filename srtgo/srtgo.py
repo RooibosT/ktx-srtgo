@@ -13,6 +13,7 @@ import asyncio
 import click
 import inquirer
 import keyring
+import os
 import telegram
 import time
 import re
@@ -160,6 +161,10 @@ def srtgo(debug=False):
         8: lambda _: set_options(),
     }
 
+    fixed_rail_type = os.getenv("SRTGO_RAIL_TYPE", "").strip().upper()
+    if fixed_rail_type not in {"SRT", "KTX"}:
+        fixed_rail_type = None
+
     while True:
         choice = inquirer.list_input(
             message="메뉴 선택 (↕:이동, Enter: 선택)", choices=MENU_CHOICES
@@ -169,12 +174,15 @@ def srtgo(debug=False):
             break
 
         if choice in {1, 2, 3, 6, 7}:
-            rail_type = inquirer.list_input(
-                message="열차 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
-                choices=RAIL_CHOICES,
-            )
-            if rail_type in {-1, None}:
-                continue
+            if fixed_rail_type is not None:
+                rail_type = fixed_rail_type
+            else:
+                rail_type = inquirer.list_input(
+                    message="열차 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
+                    choices=RAIL_CHOICES,
+                )
+                if rail_type in {-1, None}:
+                    continue
         else:
             rail_type = None
 

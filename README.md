@@ -19,17 +19,17 @@
 
 ## Quick Start
 
-### 1) Environment Setup (`uv` or `conda`)
+### 1) 설치 (`uv` 또는 `conda`)
 
 ```bash
 ./install.sh
 ```
 
-On first run, `install.sh` asks you to choose:
-- `uv` (creates `.venv`)
-- `conda` (creates `srtgo-env`, configurable via `--env-name`)
+첫 실행 시 환경 관리자를 선택합니다.
+- `uv`: `.venv` 생성
+- `conda`: 기본 `srtgo-env` 생성 (`--env-name`으로 변경 가능)
 
-Useful options:
+자주 쓰는 옵션:
 
 ```bash
 ./install.sh --uv
@@ -37,24 +37,54 @@ Useful options:
 ./install.sh --reconfigure
 ```
 
-### 2) Run SRTgo
+### 2) 실행 (`run.sh`)
+
+```bash
+./run.sh
+```
+
+`run.sh`는 다음을 자동으로 처리합니다.
+- `install.sh`에서 선택한 환경(`uv`/`conda`) 활성화
+- 화살표 메뉴로 `KTX` / `SRT` 선택 후 실행
+
+직접 지정 실행:
+
+```bash
+./run.sh --ktx
+./run.sh --srt
+```
+
+## 개별 실행
+
+직접 커맨드로 실행할 수도 있습니다.
 
 ```bash
 srtgo
-```
-
-### 3) Run KTXgo
-
-```bash
-# Optional: register card for auto-pay (TTY)
-python -m ktxgo --set-card
-
-# Start reservation flow
 python -m ktxgo
 ```
 
-- Interactive mode lets you select departure/arrival/date/time/seat and target trains.
-- For full KTXgo usage, see [ktxgo/README.md](ktxgo/README.md).
+KTX 카드 등록(자동결제 사용 시):
+
+```bash
+python -m ktxgo --set-card
+```
+
+## KTXgo 주요 기능
+
+- 수동 로그인 + 쿠키 저장/재사용
+- TTY 메뉴
+  - 예매 시작
+  - 예매 정보 확인 (예약/발권 내역)
+  - 로그인 설정
+  - 역 설정
+  - 카드 등록/수정
+- 출발/도착/날짜/시간/인원/열차/좌석선호 기반 예매 루프
+- 자동결제(스마트티켓 기본 ON), 텔레그램 알림
+
+세부 옵션/구조 설명은 [ktxgo/README.md](ktxgo/README.md)를 참고하세요.
 
 ## Acknowledgments
-- This project includes code from [SRT](https://github.com/ryanking13/SRT) by ryanking13, licensed under the MIT License, and [korail2](https://github.com/carpedm20/korail2) by carpedm20, licensed under the BSD License.
+
+This project includes code from:
+- [SRT](https://github.com/ryanking13/SRT) by ryanking13 (MIT License)
+- [korail2](https://github.com/carpedm20/korail2) by carpedm20 (BSD License)
