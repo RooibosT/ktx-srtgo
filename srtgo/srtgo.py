@@ -30,6 +30,8 @@ from .ktx import (
     Disability4To6Passenger,
 )
 
+from .keyring_bootstrap import configure_keyring_backend
+
 from .srt import (
     SRT,
     SRTError,
@@ -132,6 +134,8 @@ ChoiceType = Union[int, None]
 @click.command()
 @click.option("--debug", is_flag=True, help="Debug mode")
 def srtgo(debug=False):
+    configure_keyring_backend()
+
     MENU_CHOICES = [
         ("예매 시작", 1),
         ("예매 확인/결제/취소", 2),

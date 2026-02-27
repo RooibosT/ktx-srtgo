@@ -12,6 +12,8 @@ import inquirer
 import keyring
 from termcolor import colored
 
+from srtgo.keyring_bootstrap import configure_keyring_backend
+
 from .browser import BrowserManager
 from .config import COOKIE_PATH, DEFAULT_ARRIVAL, DEFAULT_DEPARTURE, POLL_INTERVAL_S, STATIONS
 from .korail import KorailAPI, KorailError, Train
@@ -989,6 +991,8 @@ def main(
     smart_ticket: bool,
     telegram: bool,
 ) -> None:
+    configure_keyring_backend()
+
     if set_card_mode:
         if not sys.stdin.isatty():
             raise click.UsageError("--set-card requires a TTY")

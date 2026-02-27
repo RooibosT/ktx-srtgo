@@ -20,6 +20,7 @@ dependencies = [
     "requests",
     "inquirer>=3.4",
     "keyring",
+    "keyrings.alt",
     "PyCryptodome",
     "prompt_toolkit>=3",
     "python-telegram-bot",

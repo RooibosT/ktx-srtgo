@@ -19,7 +19,7 @@ Playwright(Firefox) 기반 KTX 예매 자동화 CLI.
 - [Playwright](https://playwright.dev/python/) (Firefox)
 
 ```bash
-pip install playwright click keyring python-telegram-bot
+pip install playwright click keyring keyrings.alt python-telegram-bot
 playwright install firefox
 ```
 
