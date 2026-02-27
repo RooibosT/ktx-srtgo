@@ -22,6 +22,11 @@ API_CANCEL = "/classes/com.korail.mobile.reservationCancel.ReservationCancelChk"
 API_MYTICKET = "/classes/com.korail.mobile.myTicket.MyTicketList"
 API_PAY = "/classes/com.korail.mobile.payment.ReservationPayment"
 
+# Mobile API defaults observed in KorailTalk
+MOBILE_DEVICE = "AD"
+MOBILE_VERSION = "250601002"
+MOBILE_KEY = "korail1234567890"
+
 # Stealth
 STEALTH_SCRIPT = (
     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"

@@ -15,6 +15,9 @@ from .config import (
     API_RESERVE,
     API_SCHEDULE,
     LOGIN_URL,
+    MOBILE_DEVICE,
+    MOBILE_KEY,
+    MOBILE_VERSION,
     RSV_AVAILABLE,
     SEARCH_URL,
     TRAIN_GROUP_ALL,
@@ -340,87 +343,118 @@ class KorailAPI:
             raise KorailError("Missing reservation number (h_pnr_no).")
 
         wct_no = str(reserve_result.get("h_wct_no", ""))
+        rsv_chg_no = str(
+            reserve_result.get("h_rsv_chg_no", reserve_result.get("hidRsvChgNo", ""))
+        ).strip()
         tmp_job_sqno1 = str(reserve_result.get("h_tmp_job_sqno1", "000000"))
         tmp_job_sqno2 = str(reserve_result.get("h_tmp_job_sqno2", "000000"))
-
-        # Determine price from reserve response
-        # Try jrny_infos -> jrny_info -> h_rsv_amt first, then top-level
         price = ""
-        jrny_infos = reserve_result.get("jrny_infos")
-        if isinstance(jrny_infos, dict):
-            jrny_info = jrny_infos.get("jrny_info")
-            if isinstance(jrny_info, dict):
-                price = str(jrny_info.get("h_rsv_amt", ""))
-            elif isinstance(jrny_info, list) and jrny_info:
-                price = str(jrny_info[0].get("h_rsv_amt", ""))
-        if not price:
-            price = str(reserve_result.get("h_rsv_amt", "0"))
-        price = "".join(ch for ch in price if ch.isdigit())
 
-        # Some reserve responses omit payment context. Recover it from reservation APIs.
-        if not wct_no:
+        def _digit_only(value: object) -> str:
+            return "".join(ch for ch in str(value) if ch.isdigit())
+
+        def _dict_items(value: object) -> list[dict[str, object]]:
+            if isinstance(value, dict):
+                return [cast(dict[str, object], value)]
+            if not isinstance(value, list):
+                return []
+            return [
+                cast(dict[str, object], item)
+                for item in cast(list[object], value)
+                if isinstance(item, dict)
+            ]
+
+        def _hydrate_from_item(item: dict[str, object], *, require_pnr: bool) -> None:
+            nonlocal price, wct_no, tmp_job_sqno1, tmp_job_sqno2, rsv_chg_no
+            if require_pnr:
+                item_pnr = str(item.get("h_pnr_no", item.get("hidPnrNo", ""))).strip()
+                if item_pnr and item_pnr != pnr_no:
+                    return
+
+            if (not price or price == "0"):
+                for key in ("h_rsv_amt", "h_rcvd_amt", "hidPayAmount"):
+                    candidate = _digit_only(item.get(key, ""))
+                    if candidate and candidate != "0":
+                        price = candidate
+                        break
+
+            if not wct_no:
+                for key in ("h_wct_no", "hidWctNo"):
+                    candidate = str(item.get(key, "")).strip()
+                    if candidate:
+                        wct_no = candidate
+                        break
+
+            if not rsv_chg_no:
+                for key in ("h_rsv_chg_no", "hidRsvChgNo"):
+                    candidate = str(item.get(key, "")).strip()
+                    if candidate:
+                        rsv_chg_no = candidate
+                        break
+
+            if tmp_job_sqno1 in {"", "000000"}:
+                candidate = str(item.get("h_tmp_job_sqno1", "")).strip()
+                if candidate:
+                    tmp_job_sqno1 = candidate
+
+            if tmp_job_sqno2 in {"", "000000"}:
+                candidate = str(item.get("h_tmp_job_sqno2", "")).strip()
+                if candidate:
+                    tmp_job_sqno2 = candidate
+
+        def _hydrate_from_payload(
+            data: dict[str, object], *, include_top_level: bool
+        ) -> None:
+            if include_top_level:
+                _hydrate_from_item(data, require_pnr=False)
+            jrny_infos_obj = data.get("jrny_infos")
+            if not isinstance(jrny_infos_obj, dict):
+                return
+            jrny_items = _dict_items(jrny_infos_obj.get("jrny_info"))
+            for jrny in jrny_items:
+                _hydrate_from_item(jrny, require_pnr=False)
+
+                train_infos_obj = jrny.get("train_infos")
+                if not isinstance(train_infos_obj, dict):
+                    continue
+                for train in _dict_items(train_infos_obj.get("train_info")):
+                    _hydrate_from_item(train, require_pnr=True)
+
+        _hydrate_from_payload(reserve_result, include_top_level=True)
+
+        # Some reserve responses omit payment context.
+        # Recover from reservation APIs using the same defaults as KorailTalk.
+        mobile_base = {
+            "Device": MOBILE_DEVICE,
+            "Version": MOBILE_VERSION,
+            "Key": MOBILE_KEY,
+        }
+        need_context = (
+            (not price or price == "0")
+            or not wct_no
+            or not rsv_chg_no
+            or tmp_job_sqno1 in {"", "000000"}
+            or tmp_job_sqno2 in {"", "000000"}
+        )
+        if need_context:
             detail = self._api_call(
                 API_RESERVATION_LIST,
                 {
-                    "Device": "BH",
-                    "Version": "999999999",
+                    **mobile_base,
                     "hidPnrNo": pnr_no,
                 },
             )
-            wct_no = str(detail.get("h_wct_no", "")).strip()
+            _hydrate_from_payload(detail, include_top_level=True)
 
-        if not price or price == "0":
-            view = self._api_call(
-                API_RESERVATION_VIEW,
-                {
-                    "Device": "BH",
-                    "Version": "999999999",
-                },
-            )
-            jrny_infos_obj = view.get("jrny_infos")
-            if isinstance(jrny_infos_obj, dict):
-                jrny_info_obj = jrny_infos_obj.get("jrny_info")
-                jrny_items: list[dict[str, object]] = []
-                if isinstance(jrny_info_obj, dict):
-                    jrny_items = [cast(dict[str, object], jrny_info_obj)]
-                elif isinstance(jrny_info_obj, list):
-                    jrny_items = [
-                        cast(dict[str, object], item)
-                        for item in cast(list[object], jrny_info_obj)
-                        if isinstance(item, dict)
-                    ]
-
-                for jrny in jrny_items:
-                    train_infos_obj = jrny.get("train_infos")
-                    if not isinstance(train_infos_obj, dict):
-                        continue
-                    train_info_obj = train_infos_obj.get("train_info")
-                    train_items: list[dict[str, object]] = []
-                    if isinstance(train_info_obj, dict):
-                        train_items = [cast(dict[str, object], train_info_obj)]
-                    elif isinstance(train_info_obj, list):
-                        train_items = [
-                            cast(dict[str, object], item)
-                            for item in cast(list[object], train_info_obj)
-                            if isinstance(item, dict)
-                        ]
-
-                    for item in train_items:
-                        if str(item.get("h_pnr_no", "")).strip() != pnr_no:
-                            continue
-                        if not price or price == "0":
-                            price_candidate = "".join(
-                                ch for ch in str(item.get("h_rsv_amt", "")) if ch.isdigit()
-                            )
-                            if price_candidate:
-                                price = price_candidate
-                        if not wct_no:
-                            wct_candidate = str(item.get("h_wct_no", "")).strip()
-                            if wct_candidate:
-                                wct_no = wct_candidate
-                        break
-                    if (price and price != "0") and wct_no:
-                        break
+        if (
+            (not price or price == "0")
+            or not wct_no
+            or not rsv_chg_no
+            or tmp_job_sqno1 in {"", "000000"}
+            or tmp_job_sqno2 in {"", "000000"}
+        ):
+            view = self._api_call(API_RESERVATION_VIEW, mobile_base)
+            _hydrate_from_payload(view, include_top_level=False)
 
         if not price or price == "0":
             raise KorailError("Unable to determine payment amount.")
@@ -431,13 +465,14 @@ class KorailAPI:
             card_type = "J" if len(birthday) <= 6 else "S"
 
         params = {
-            "Device": "BH",
-            "Version": "999999999",
+            "Device": MOBILE_DEVICE,
+            "Version": MOBILE_VERSION,
+            "Key": MOBILE_KEY,
             "hidPnrNo": pnr_no,
             "hidWctNo": wct_no,
             "hidTmpJobSqno1": tmp_job_sqno1,
             "hidTmpJobSqno2": tmp_job_sqno2,
-            "hidRsvChgNo": "000",
+            "hidRsvChgNo": rsv_chg_no or "000",
             "hidInrecmnsGridcnt": "1",
             "hidStlMnsSqno1": "1",
             "hidStlMnsCd1": "02",
