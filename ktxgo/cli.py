@@ -13,7 +13,7 @@ import keyring
 from termcolor import colored
 
 from .browser import BrowserManager
-from .config import DEFAULT_ARRIVAL, DEFAULT_DEPARTURE, POLL_INTERVAL_S, STATIONS
+from .config import COOKIE_PATH, DEFAULT_ARRIVAL, DEFAULT_DEPARTURE, POLL_INTERVAL_S, STATIONS
 from .korail import KorailAPI, KorailError, Train
 
 # Session-expired error codes returned by Korail.
@@ -147,6 +147,8 @@ def _prompt_main_menu() -> str:
         message="메뉴 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
         choices=[
             ("예매 시작", "reserve"),
+            ("예매 정보 확인", "reservation"),
+            ("로그인 설정", "login"),
             ("역 설정", "station"),
             ("카드 등록/수정", "card"),
             ("나가기", "exit"),
@@ -155,6 +157,104 @@ def _prompt_main_menu() -> str:
     if choice is None:
         return "exit"
     return str(choice)
+
+
+def _format_login_profile(profile: dict[str, str]) -> str:
+    name = profile.get("name", "").strip() or "이름 미확인"
+    member_no = profile.get("member_no", "").strip() or "회원번호 미확인"
+    login_id = profile.get("login_id", "").strip()
+    if login_id:
+        return f"{name} / 회원번호:{member_no} / ID:{login_id}"
+    return f"{name} / 회원번호:{member_no}"
+
+
+def _cached_login_profile() -> dict[str, str] | None:
+    if not COOKIE_PATH.is_file():
+        return None
+    try:
+        with BrowserManager(headless=True) as manager:
+            api = KorailAPI(manager.page)
+            return api.login_profile()
+    except Exception:
+        return None
+
+
+def _login_and_save_session(force_relogin: bool = False) -> bool:
+    backup_cookie: str | None = None
+    if force_relogin and COOKIE_PATH.is_file():
+        try:
+            backup_cookie = COOKIE_PATH.read_text()
+        except OSError:
+            backup_cookie = None
+        try:
+            COOKIE_PATH.unlink()
+        except OSError:
+            pass
+
+    manager = BrowserManager(headless=False)
+    try:
+        with manager:
+            api = KorailAPI(manager.page)
+            click.echo(f"[{_now()}] 브라우저에서 로그인하세요. (5분 제한)")
+            if not api.login_manual(timeout_s=300):
+                click.echo("로그인 시간이 초과되었습니다.")
+                if force_relogin and backup_cookie is not None:
+                    COOKIE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    COOKIE_PATH.write_text(backup_cookie)
+                return False
+
+            manager.save_cookies()
+            profile = api.login_profile()
+            if profile is None:
+                click.echo(f"[{_now()}] 로그인 성공 — 세션 저장 완료.")
+            else:
+                click.echo(
+                    f"[{_now()}] 로그인 성공 — 세션 저장 완료. "
+                    f"({_format_login_profile(profile)})"
+                )
+            return True
+    except Exception as exc:
+        if force_relogin and backup_cookie is not None and not COOKIE_PATH.is_file():
+            try:
+                COOKIE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                COOKIE_PATH.write_text(backup_cookie)
+            except OSError:
+                pass
+        click.echo(f"[{_now()}] 로그인 설정 실패: {exc}")
+        return False
+
+
+def _configure_login_interactive() -> None:
+    click.echo("\n로그인 설정")
+
+    if not COOKIE_PATH.is_file():
+        click.echo("저장된 로그인 세션이 없습니다.")
+        if click.confirm("지금 로그인 창을 열까요?", default=True):
+            _login_and_save_session(force_relogin=False)
+        return
+
+    profile = _cached_login_profile()
+    if profile is None:
+        click.echo("저장된 세션이 만료되었거나 유효하지 않습니다.")
+        if click.confirm("다시 로그인할까요?", default=True):
+            _login_and_save_session(force_relogin=True)
+        return
+
+    click.echo(f"현재 로그인 정보: {_format_login_profile(profile)}")
+    choice = inquirer.list_input(
+        message="로그인 정보 처리",
+        choices=[
+            ("현재 로그인 정보 유지", "keep"),
+            ("로그인 정보 변경 (다시 로그인)", "change"),
+            ("취소", "cancel"),
+        ],
+    )
+    if choice == "change":
+        _login_and_save_session(force_relogin=True)
+    elif choice == "keep":
+        click.echo("현재 로그인 정보를 유지합니다.")
+    else:
+        click.echo("로그인 설정을 취소했습니다.")
 
 
 def _load_visible_stations() -> list[str]:
@@ -403,6 +503,150 @@ def _render_screen(status_line: str, target_line: str | None, clear_screen: bool
     click.echo(status_line)
     if target_line:
         click.echo(target_line)
+
+
+def _first_non_empty(row: dict[str, object], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = str(row.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _digits_only(value: object) -> str:
+    return "".join(ch for ch in str(value) if ch.isdigit())
+
+
+def _fmt_yyyymmdd(value: object) -> str:
+    digits = _digits_only(value)
+    if len(digits) >= 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    return str(value).strip()
+
+
+def _fmt_hhmm(value: object) -> str:
+    digits = _digits_only(value)
+    if len(digits) >= 4:
+        return f"{digits[:2]}:{digits[2:4]}"
+    return str(value).strip()
+
+
+def _fmt_datetime(date_value: object, time_value: object) -> str:
+    date_part = _fmt_yyyymmdd(date_value)
+    time_part = _fmt_hhmm(time_value)
+    if date_part and time_part:
+        return f"{date_part} {time_part}"
+    if date_part:
+        return date_part
+    if time_part:
+        return time_part
+    return "-"
+
+
+def _fmt_amount(value: object) -> str:
+    digits = _digits_only(value)
+    if not digits:
+        return "-"
+    return f"{int(digits):,}"
+
+
+def _print_reservations(
+    reservations: list[dict[str, object]],
+    *,
+    record_kind: str = "reservation",
+) -> None:
+    header = _format_row(
+        [
+            ("idx", 3, "right"),
+            ("pnr", 15, "right"),
+            ("train", 6, "right"),
+            ("route", 15, "left"),
+            ("depart", 16, "left"),
+            ("limit", 16, "left"),
+            ("amount", 10, "right"),
+        ]
+    )
+    click.echo(header)
+    click.echo("-" * len(header))
+
+    for idx, row in enumerate(reservations):
+        pnr = _first_non_empty(row, ("h_pnr_no", "pnrNo"))
+        train_no = _first_non_empty(row, ("h_trn_no", "trnNo"))
+        dep_stn = _first_non_empty(row, ("h_dpt_rs_stn_nm", "dptRsStnNm"))
+        arv_stn = _first_non_empty(row, ("h_arv_rs_stn_nm", "arvRsStnNm"))
+        route = f"{dep_stn}->{arv_stn}" if dep_stn or arv_stn else "-"
+
+        dep_date = _first_non_empty(row, ("h_run_dt", "h_dpt_dt", "dptDt"))
+        dep_time = _first_non_empty(row, ("h_dpt_tm", "h_dpt_tm_qb", "dptTm"))
+        depart = _fmt_datetime(dep_date, dep_time)
+
+        if record_kind == "ticket":
+            limit = "발권완료"
+        else:
+            limit_date = _first_non_empty(row, ("h_ntisu_lmt_dt", "ntisuLmtDt"))
+            limit_time = _first_non_empty(row, ("h_ntisu_lmt_tm", "ntisuLmtTm"))
+            is_waiting = (
+                limit_date in {"", "00000000"} or limit_time in {"", "235959"}
+            )
+            limit = "예약대기" if is_waiting else _fmt_datetime(limit_date, limit_time)
+
+        amount = _fmt_amount(
+            _first_non_empty(row, ("h_rsv_amt", "h_rcvd_amt", "rsvAmt"))
+        )
+
+        line = _format_row(
+            [
+                (str(idx), 3, "right"),
+                (pnr or "-", 15, "right"),
+                (train_no or "-", 6, "right"),
+                (route, 15, "left"),
+                (depart, 16, "left"),
+                (limit, 16, "left"),
+                (amount, 10, "right"),
+            ]
+        )
+        click.echo(line)
+
+
+def _show_reservations_interactive() -> None:
+    click.echo("\n예매 정보 조회")
+    with BrowserManager(headless=True) as manager:
+        api = KorailAPI(manager.page)
+        try:
+            api = _ensure_login(api, manager, headless=True)
+        except SystemExit:
+            return
+
+        profile = api.login_profile()
+        if profile:
+            click.echo(f"조회 계정: {_format_login_profile(profile)}")
+
+        try:
+            reservations = api.reservations()
+        except KorailError as exc:
+            click.echo(f"[{_now()}] 예매 정보 조회 실패: {exc}")
+            return
+
+        try:
+            tickets = api.tickets()
+        except KorailError:
+            tickets = []
+
+    if not reservations and not tickets:
+        click.echo("현재 예약/발권 내역이 없습니다.")
+        return
+
+    if reservations:
+        click.echo(f"\n예약 내역 {len(reservations)}건")
+        _print_reservations(reservations, record_kind="reservation")
+    else:
+        click.echo("\n예약 내역 0건")
+
+    if tickets:
+        click.echo(f"\n발권 내역 {len(tickets)}건")
+        _print_reservations(tickets, record_kind="ticket")
+    else:
+        click.echo("\n발권 내역 0건")
 
 
 def _seat_available(train: Train, seat: str) -> bool:
@@ -774,6 +1018,12 @@ def main(
             action = _prompt_main_menu()
             if action == "reserve":
                 break
+            if action == "reservation":
+                _show_reservations_interactive()
+                continue
+            if action == "login":
+                _configure_login_interactive()
+                continue
             if action == "station":
                 _set_visible_stations_interactive()
                 visible_stations = _load_visible_stations()

@@ -9,6 +9,7 @@ from playwright.sync_api import Page
 
 from .config import (
     API_LOGIN_CHECK,
+    API_MYTICKET,
     API_PAY,
     API_RESERVATION_LIST,
     API_RESERVATION_VIEW,
@@ -289,31 +290,245 @@ class KorailAPI:
                 return True
         return False
 
+    def login_profile(self) -> dict[str, str] | None:
+        """Return current login profile from loginCheck response, or None."""
+        try:
+            data = self._api_call(API_LOGIN_CHECK, {})
+        except KorailError:
+            return None
+
+        msg = str(data.get("h_msg_txt", "")).strip()
+        if "로그인 정보가 없습니다" in msg or ("로그인" in msg and "없" in msg):
+            return None
+
+        member_no = ""
+        for key in ("strMbCrdNo", "mbCrdNo", "strCustNo", "custNo"):
+            value = str(data.get(key, "")).strip()
+            if value and value not in {"N", "FALSE", "0"}:
+                member_no = value
+                break
+
+        name = ""
+        for key in ("strCustNm", "custNm", "h_cust_nm", "strUserNm"):
+            value = str(data.get(key, "")).strip()
+            if value and value not in {"N", "FALSE", "0"}:
+                name = value
+                break
+
+        login_id = ""
+        for key in ("strCustId", "custId", "userId"):
+            value = str(data.get(key, "")).strip()
+            if value and value not in {"N", "FALSE", "0"}:
+                login_id = value
+                break
+
+        if not any((member_no, name, login_id)):
+            if data.get("strResult") in {"SUCC", "SUCCESS", "Y"}:
+                return {"member_no": "", "name": "", "login_id": ""}
+            return None
+
+        return {
+            "member_no": member_no,
+            "name": name,
+            "login_id": login_id,
+        }
+
     def reservations(self) -> list[dict[str, object]]:
-        data = self._api_call(
-            API_RESERVATION_LIST,
-            {
-                "Device": "BH",
-                "Version": "999999999",
-            },
-        )
+        mobile_base = {
+            "Device": MOBILE_DEVICE,
+            "Version": MOBILE_VERSION,
+            "Key": MOBILE_KEY,
+        }
+        try:
+            data = self._api_call(API_RESERVATION_VIEW, mobile_base)
+        except KorailError as exc:
+            code = (exc.code or "").strip()
+            msg = str(exc)
+            no_result_codes = {"P100", "WRG000000", "WRD000061", "WRT300005"}
+            if code in no_result_codes or ("예약" in msg and "없" in msg):
+                return []
+            raise
 
         jrny_infos_obj = data.get("jrny_infos")
         if not isinstance(jrny_infos_obj, dict):
             return []
         jrny_infos = cast(dict[str, object], jrny_infos_obj)
 
-        items_obj = jrny_infos.get("jrny_info")
-        if isinstance(items_obj, dict):
-            return [cast(dict[str, object], items_obj)]
-        if not isinstance(items_obj, list):
+        jrny_info_obj = jrny_infos.get("jrny_info")
+        jrny_items: list[dict[str, object]] = []
+        if isinstance(jrny_info_obj, dict):
+            jrny_items = [cast(dict[str, object], jrny_info_obj)]
+        elif isinstance(jrny_info_obj, list):
+            jrny_items = [
+                cast(dict[str, object], item)
+                for item in cast(list[object], jrny_info_obj)
+                if isinstance(item, dict)
+            ]
+        if not jrny_items:
             return []
 
         reservations: list[dict[str, object]] = []
-        for item in cast(list[object], items_obj):
-            if isinstance(item, dict):
-                reservations.append(cast(dict[str, object], item))
+        inherit_keys = (
+            "h_pnr_no",
+            "h_rsv_amt",
+            "h_ntisu_lmt_dt",
+            "h_ntisu_lmt_tm",
+            "h_run_dt",
+            "h_dpt_dt",
+            "h_dpt_tm",
+            "h_dpt_rs_stn_nm",
+            "h_arv_rs_stn_nm",
+            "h_trn_no",
+            "h_rsv_chg_no",
+            "hidRsvChgNo",
+            "h_wct_no",
+        )
+        for jrny in jrny_items:
+            train_infos_obj = jrny.get("train_infos")
+            if not isinstance(train_infos_obj, dict):
+                reservations.append(jrny)
+                continue
+            train_info_obj = train_infos_obj.get("train_info")
+            train_items: list[dict[str, object]] = []
+            if isinstance(train_info_obj, dict):
+                train_items = [cast(dict[str, object], train_info_obj)]
+            elif isinstance(train_info_obj, list):
+                train_items = [
+                    cast(dict[str, object], item)
+                    for item in cast(list[object], train_info_obj)
+                    if isinstance(item, dict)
+                ]
+
+            if not train_items:
+                reservations.append(jrny)
+                continue
+
+            for train in train_items:
+                merged = dict(train)
+                for key in inherit_keys:
+                    if str(merged.get(key, "")).strip():
+                        continue
+                    if key in jrny:
+                        merged[key] = jrny[key]
+                reservations.append(cast(dict[str, object], merged))
         return reservations
+
+    def tickets(self) -> list[dict[str, object]]:
+        """Return issued ticket list (paid bookings)."""
+        no_result_codes = {"P100", "WRG000000", "WRD000061", "WRT300005"}
+        param_candidates = [
+            {
+                "Device": MOBILE_DEVICE,
+                "Version": MOBILE_VERSION,
+                "Key": MOBILE_KEY,
+                "txtDeviceId": "",
+                "txtIndex": "1",
+                "h_page_no": "1",
+                "h_abrd_dt_from": "",
+                "h_abrd_dt_to": "",
+                "hiduserYn": "Y",
+            },
+            {
+                "Device": "BH",
+                "Version": "999999999",
+                "txtDeviceId": "",
+                "txtIndex": "1",
+                "h_page_no": "1",
+                "h_abrd_dt_from": "",
+                "h_abrd_dt_to": "",
+                "hiduserYn": "Y",
+            },
+        ]
+
+        data: dict[str, object] | None = None
+        for params in param_candidates:
+            try:
+                data = self._api_call(API_MYTICKET, params)
+                break
+            except KorailError as exc:
+                code = (exc.code or "").strip()
+                msg = str(exc)
+                if code in no_result_codes or ("예약" in msg and "없" in msg):
+                    return []
+                continue
+
+        if data is None:
+            return []
+
+        reservation_list_obj = data.get("reservation_list")
+        entries: list[dict[str, object]] = []
+        if isinstance(reservation_list_obj, dict):
+            entries = [cast(dict[str, object], reservation_list_obj)]
+        elif isinstance(reservation_list_obj, list):
+            entries = [
+                cast(dict[str, object], item)
+                for item in cast(list[object], reservation_list_obj)
+                if isinstance(item, dict)
+            ]
+        if not entries:
+            return []
+
+        tickets: list[dict[str, object]] = []
+        inherit_keys = (
+            "h_pnr_no",
+            "h_orgtk_sale_dt",
+            "h_orgtk_wct_no",
+            "h_orgtk_ret_sale_dt",
+            "h_orgtk_sale_sqno",
+            "h_orgtk_ret_pwd",
+            "h_rcvd_amt",
+            "h_buy_ps_nm",
+        )
+        for entry in entries:
+            ticket_list_obj = entry.get("ticket_list")
+            ticket_items: list[dict[str, object]] = []
+            if isinstance(ticket_list_obj, dict):
+                ticket_items = [cast(dict[str, object], ticket_list_obj)]
+            elif isinstance(ticket_list_obj, list):
+                ticket_items = [
+                    cast(dict[str, object], item)
+                    for item in cast(list[object], ticket_list_obj)
+                    if isinstance(item, dict)
+                ]
+
+            if not ticket_items:
+                tickets.append(entry)
+                continue
+
+            for ticket in ticket_items:
+                train_info_obj = ticket.get("train_info")
+                train_items: list[dict[str, object]] = []
+                if isinstance(train_info_obj, dict):
+                    train_items = [cast(dict[str, object], train_info_obj)]
+                elif isinstance(train_info_obj, list):
+                    train_items = [
+                        cast(dict[str, object], item)
+                        for item in cast(list[object], train_info_obj)
+                        if isinstance(item, dict)
+                    ]
+
+                if not train_items:
+                    merged_ticket = dict(ticket)
+                    for key in inherit_keys:
+                        if str(merged_ticket.get(key, "")).strip():
+                            continue
+                        if key in entry:
+                            merged_ticket[key] = entry[key]
+                    tickets.append(cast(dict[str, object], merged_ticket))
+                    continue
+
+                for train in train_items:
+                    merged = dict(train)
+                    for key in inherit_keys:
+                        if str(merged.get(key, "")).strip():
+                            continue
+                        if key in ticket:
+                            merged[key] = ticket[key]
+                        elif key in entry:
+                            merged[key] = entry[key]
+                    tickets.append(cast(dict[str, object], merged))
+
+        return tickets
 
     def pay(
         self,
