@@ -46,6 +46,10 @@ srtgo
 ### 3) Run KTXgo
 
 ```bash
+# Optional: register card for auto-pay (TTY)
+python -m ktxgo --set-card
+
+# Start reservation flow
 python -m ktxgo
 ```
 

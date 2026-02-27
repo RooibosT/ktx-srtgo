@@ -82,13 +82,26 @@ def _train_choice_label(idx: int, train: Train) -> str:
     )
 
 
+def _prompt_main_menu() -> str:
+    choice = inquirer.list_input(
+        message="메뉴 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
+        choices=[
+            ("예매 시작", "reserve"),
+            ("카드 등록/수정", "card"),
+            ("나가기", "exit"),
+        ],
+    )
+    if choice is None:
+        return "exit"
+    return str(choice)
+
+
 def _prompt_conditions(
     departure: str,
     arrival: str,
     date: str,
     time_str: str,
-    seat: str,
-) -> tuple[str, str, str, str, str]:
+) -> tuple[str, str, str, str]:
     click.echo("\n대화형 모드: 화살표(↑/↓)로 조회 조건을 선택하세요.")
     now = datetime.now() + timedelta(minutes=10)
     max_days = 31 if now.hour >= 7 else 30
@@ -106,13 +119,6 @@ def _prompt_conditions(
         date_choices.insert(0, (date_dt.strftime("%Y/%m/%d %a (직접지정)"), date))
 
     time_choices = [(f"{hour:02d}시", f"{hour:02d}") for hour in range(24)]
-    seat_choices = [
-        ("일반석", "general"),
-        ("특석", "special"),
-        ("모두 (일반석/특석)", "any"),
-        ("입석/자유석", "standing"),
-    ]
-
     while True:
         info = inquirer.prompt(
             [
@@ -140,12 +146,6 @@ def _prompt_conditions(
                     choices=time_choices,
                     default=time_str,
                 ),
-                inquirer.List(
-                    "seat",
-                    message="좌석 선호 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
-                    choices=seat_choices,
-                    default=seat,
-                ),
             ]
         )
         if not info:
@@ -160,8 +160,7 @@ def _prompt_conditions(
 
         date = _validate_date(str(info["date"]))
         time_str = _validate_hour(str(info["time"]))
-        seat = str(info["seat"])
-        return departure, arrival, date, time_str, seat
+        return departure, arrival, date, time_str
 
 
 def _prompt_target_trains(
@@ -212,6 +211,57 @@ def _prompt_target_trains(
             "선택한 열차: " + ", ".join(_train_brief(train) for train in selected)
         )
         return [_train_key(train) for train in selected]
+
+
+def _prompt_reservation_options(
+    default_seat: str, default_auto_pay: bool, default_smart_ticket: bool
+) -> tuple[str, bool, bool]:
+    seat_choices = [
+        ("일반석", "general"),
+        ("특석", "special"),
+        ("모두 (일반석/특석)", "any"),
+        ("입석/자유석", "standing"),
+    ]
+
+    choice = inquirer.prompt(
+        [
+            inquirer.List(
+                "seat",
+                message="좌석 선호 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
+                choices=seat_choices,
+                default=default_seat,
+            ),
+            inquirer.Confirm(
+                "auto_pay",
+                message="예매 성공 시 카드 자동결제",
+                default=default_auto_pay,
+            ),
+        ]
+    )
+    if choice is None:
+        click.echo("예매 옵션 입력 중 취소되었습니다.")
+        sys.exit(0)
+
+    seat = str(choice.get("seat", default_seat))
+    auto_pay = bool(choice.get("auto_pay", False))
+    if not auto_pay:
+        return seat, False, default_smart_ticket
+
+    smart_choice = inquirer.prompt(
+        [
+            inquirer.Confirm(
+                "smart_ticket",
+                message="스마트티켓 발권 (코레일톡 앱 이용 시 체크)",
+                default=default_smart_ticket,
+            )
+        ]
+    )
+    if smart_choice is None:
+        click.echo("예매 옵션 입력 중 취소되었습니다.")
+        sys.exit(0)
+
+    smart_ticket = bool(smart_choice.get("smart_ticket", default_smart_ticket))
+    return seat, True, smart_ticket
 
 
 def _resolve_targets(trains: list[Train], targets: list[TrainKey]) -> tuple[list[Train], int]:
@@ -339,7 +389,93 @@ def _load_card() -> dict[str, str] | None:
     }
 
 
-def _do_pay(api: KorailAPI, reserve_result: dict[str, object]) -> bool:
+def _set_card_interactive() -> bool:
+    """Set card info using TTY prompts and save to keyring."""
+    defaults = {
+        "card_number": keyring.get_password("KTX", "card_number") or "",
+        "card_password": keyring.get_password("KTX", "card_password") or "",
+        "birthday": keyring.get_password("KTX", "birthday") or "",
+        "card_expire": keyring.get_password("KTX", "card_expire") or "",
+    }
+
+    card_info = inquirer.prompt(
+        [
+            inquirer.Password(
+                "card_number",
+                message="카드번호 (하이픈 제외, Enter: 완료, Ctrl-C: 취소)",
+                default=defaults["card_number"],
+            ),
+            inquirer.Password(
+                "card_password",
+                message="카드 비밀번호 앞 2자리 (Enter: 완료, Ctrl-C: 취소)",
+                default=defaults["card_password"],
+            ),
+            inquirer.Password(
+                "birthday",
+                message="생년월일 YYMMDD / 사업자번호 10자리 (Enter: 완료, Ctrl-C: 취소)",
+                default=defaults["birthday"],
+            ),
+            inquirer.Password(
+                "card_expire",
+                message="유효기간 YYMM (Enter: 완료, Ctrl-C: 취소)",
+                default=defaults["card_expire"],
+            ),
+        ]
+    )
+
+    if not card_info:
+        click.echo("카드 등록이 취소되었습니다.")
+        return False
+
+    card_number = str(card_info["card_number"]).replace("-", "").replace(" ", "")
+    card_password = str(card_info["card_password"]).strip()
+    birthday = str(card_info["birthday"]).strip()
+    card_expire = str(card_info["card_expire"]).strip()
+
+    if not card_number.isdigit():
+        click.echo("입력 오류: 카드번호는 숫자만 입력하세요.")
+        return False
+    if len(card_password) != 2 or not card_password.isdigit():
+        click.echo("입력 오류: 카드 비밀번호 앞 2자리를 숫자로 입력하세요.")
+        return False
+    if len(birthday) not in (6, 10) or not birthday.isdigit():
+        click.echo("입력 오류: 생년월일 6자리 또는 사업자번호 10자리를 입력하세요.")
+        return False
+    if len(card_expire) != 4 or not card_expire.isdigit():
+        click.echo("입력 오류: 유효기간은 YYMM 4자리 숫자입니다.")
+        return False
+
+    keyring.set_password("KTX", "card_number", card_number)
+    keyring.set_password("KTX", "card_password", card_password)
+    keyring.set_password("KTX", "birthday", birthday)
+    keyring.set_password("KTX", "card_expire", card_expire)
+    click.echo("카드 정보가 저장되었습니다.")
+    return True
+
+
+def _ensure_card_for_auto_pay() -> bool:
+    """Ensure card exists for auto-pay. Returns True if auto-pay can proceed."""
+    if _load_card() is not None:
+        return True
+
+    click.echo(
+        "자동결제를 선택했지만 카드 정보가 등록되어 있지 않습니다."
+    )
+    if click.confirm("지금 카드 정보를 등록할까요?", default=True):
+        if _set_card_interactive() and _load_card() is not None:
+            return True
+
+    click.echo(
+        "  설정 방법:\n"
+        "    keyring set KTX card_number\n"
+        "    keyring set KTX card_password\n"
+        "    keyring set KTX birthday\n"
+        "    keyring set KTX card_expire"
+    )
+    return False
+
+
+def _do_pay(api: KorailAPI, reserve_result: dict[str, object], smart_ticket: bool) -> bool:
     """Attempt auto-payment. Returns True on success."""
     card = _load_card()
     if card is None:
@@ -353,7 +489,11 @@ def _do_pay(api: KorailAPI, reserve_result: dict[str, object]) -> bool:
         )
         return False
 
-    click.echo(f"[{_now()}] Paying with card ending ...{card['card_number'][-4:]}")
+    ticket_mode = "스마트티켓" if smart_ticket else "일반발권"
+    click.echo(
+        f"[{_now()}] Paying with card ending ...{card['card_number'][-4:]} "
+        f"({ticket_mode})"
+    )
     try:
         pay_result = api.pay(
             reserve_result,
@@ -361,7 +501,15 @@ def _do_pay(api: KorailAPI, reserve_result: dict[str, object]) -> bool:
             card_password=card["card_password"],
             birthday=card["birthday"],
             card_expire=card["card_expire"],
+            smart_ticket=smart_ticket,
         )
+        pay_msg = str(pay_result.get("h_msg_txt", "")).strip()
+        # Korail may return strResult=SUCC with an error message.
+        if pay_msg and any(token in pay_msg for token in ("오류", "실패", "불가", "invalid", "error")):
+            click.echo(f"[{_now()}] Payment failed: {pay_msg}")
+            click.echo("  Reservation is kept. Pay manually before the deadline.")
+            return False
+
         click.echo(f"\n{'=' * 50}")
         click.echo("Payment successful!")
         click.echo(f"{'=' * 50}")
@@ -430,7 +578,20 @@ def _send_telegram(train: Train, reserve_result: dict[str, object], paid: bool) 
     default="any",
     show_default=True,
 )
+@click.option(
+    "--set-card",
+    "set_card_mode",
+    is_flag=True,
+    default=False,
+    help="Configure saved card info in keyring and exit",
+)
 @click.option("--auto-pay", is_flag=True, default=False, help="Auto-pay after reservation")
+@click.option(
+    "--smart-ticket/--no-smart-ticket",
+    default=True,
+    show_default=True,
+    help="Smart-ticket issuance option for auto-pay",
+)
 @click.option("--telegram", is_flag=True, default=False, help="Send Telegram notification")
 def main(
     departure: str,
@@ -441,9 +602,18 @@ def main(
     interactive: bool | None,
     max_attempts: int,
     seat: str,
+    set_card_mode: bool,
     auto_pay: bool,
+    smart_ticket: bool,
     telegram: bool,
 ) -> None:
+    if set_card_mode:
+        if not sys.stdin.isatty():
+            raise click.UsageError("--set-card requires a TTY")
+        if not _set_card_interactive():
+            sys.exit(0)
+        sys.exit(0)
+
     departure = _normalize_station(departure)
     arrival = _normalize_station(arrival)
     if departure == arrival:
@@ -460,14 +630,17 @@ def main(
     if interactive_mode and not sys.stdin.isatty():
         raise click.UsageError("--interactive requires a TTY")
     if interactive_mode:
-        departure, arrival, date, time_str, seat = _prompt_conditions(
-            departure, arrival, date, time_str, seat
+        while True:
+            action = _prompt_main_menu()
+            if action == "reserve":
+                break
+            if action == "card":
+                _set_card_interactive()
+                continue
+            sys.exit(0)
+        departure, arrival, date, time_str = _prompt_conditions(
+            departure, arrival, date, time_str
         )
-
-    status_line = (
-        f"KTXgo — {departure} → {arrival}  {date} {time_str}:00  seat={seat}"
-        f"{' auto-pay' if auto_pay else ''}{' telegram' if telegram else ''}"
-    )
 
     # Graceful Ctrl+C
     def _sigint(_sig: int, _frame: object) -> None:
@@ -501,6 +674,19 @@ def main(
                     click.echo(f"[{_now()}] Initial search error: {exc}")
                     sys.exit(1)
             target_line = _target_summary(target_trains)
+            seat, auto_pay, smart_ticket = _prompt_reservation_options(
+                seat, auto_pay, smart_ticket
+            )
+            if auto_pay and not _ensure_card_for_auto_pay():
+                if click.confirm("자동결제 없이 계속 진행할까요?", default=True):
+                    auto_pay = False
+                else:
+                    sys.exit(0)
+
+        status_line = (
+            f"KTXgo — {departure} → {arrival}  {date} {time_str}:00  seat={seat}"
+            f"{' auto-pay' if auto_pay else ''}{' telegram' if telegram else ''}"
+        )
 
         if not clear_each_attempt:
             _render_screen(status_line, target_line, clear_screen=False)
@@ -580,7 +766,7 @@ def main(
                 # Auto-pay
                 paid = False
                 if auto_pay:
-                    paid = _do_pay(api, result)
+                    paid = _do_pay(api, result, smart_ticket)
 
                 # Telegram notification
                 if telegram:

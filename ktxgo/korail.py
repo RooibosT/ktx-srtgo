@@ -11,6 +11,7 @@ from .config import (
     API_LOGIN_CHECK,
     API_PAY,
     API_RESERVATION_LIST,
+    API_RESERVATION_VIEW,
     API_RESERVE,
     API_SCHEDULE,
     LOGIN_URL,
@@ -318,6 +319,7 @@ class KorailAPI:
         card_password: str,
         birthday: str,
         card_expire: str,
+        smart_ticket: bool = True,
         installment: int = 0,
         card_type: str | None = None,
     ) -> dict[str, object]:
@@ -329,10 +331,14 @@ class KorailAPI:
             card_password: First 2 digits of card password.
             birthday: YYMMDD (individual) or 10-digit biz registration number.
             card_expire: Card expiry in YYMM format.
+            smart_ticket: True = issue as smart ticket (KorailTalk), False = non-smart.
             installment: 0 = lump sum, N = N-month installment.
             card_type: 'J' for individual, 'S' for business. Auto-detected from birthday length.
         """
         pnr_no = str(reserve_result.get("h_pnr_no", ""))
+        if not pnr_no:
+            raise KorailError("Missing reservation number (h_pnr_no).")
+
         wct_no = str(reserve_result.get("h_wct_no", ""))
         tmp_job_sqno1 = str(reserve_result.get("h_tmp_job_sqno1", "000000"))
         tmp_job_sqno2 = str(reserve_result.get("h_tmp_job_sqno2", "000000"))
@@ -349,6 +355,77 @@ class KorailAPI:
                 price = str(jrny_info[0].get("h_rsv_amt", ""))
         if not price:
             price = str(reserve_result.get("h_rsv_amt", "0"))
+        price = "".join(ch for ch in price if ch.isdigit())
+
+        # Some reserve responses omit payment context. Recover it from reservation APIs.
+        if not wct_no:
+            detail = self._api_call(
+                API_RESERVATION_LIST,
+                {
+                    "Device": "BH",
+                    "Version": "999999999",
+                    "hidPnrNo": pnr_no,
+                },
+            )
+            wct_no = str(detail.get("h_wct_no", "")).strip()
+
+        if not price or price == "0":
+            view = self._api_call(
+                API_RESERVATION_VIEW,
+                {
+                    "Device": "BH",
+                    "Version": "999999999",
+                },
+            )
+            jrny_infos_obj = view.get("jrny_infos")
+            if isinstance(jrny_infos_obj, dict):
+                jrny_info_obj = jrny_infos_obj.get("jrny_info")
+                jrny_items: list[dict[str, object]] = []
+                if isinstance(jrny_info_obj, dict):
+                    jrny_items = [cast(dict[str, object], jrny_info_obj)]
+                elif isinstance(jrny_info_obj, list):
+                    jrny_items = [
+                        cast(dict[str, object], item)
+                        for item in cast(list[object], jrny_info_obj)
+                        if isinstance(item, dict)
+                    ]
+
+                for jrny in jrny_items:
+                    train_infos_obj = jrny.get("train_infos")
+                    if not isinstance(train_infos_obj, dict):
+                        continue
+                    train_info_obj = train_infos_obj.get("train_info")
+                    train_items: list[dict[str, object]] = []
+                    if isinstance(train_info_obj, dict):
+                        train_items = [cast(dict[str, object], train_info_obj)]
+                    elif isinstance(train_info_obj, list):
+                        train_items = [
+                            cast(dict[str, object], item)
+                            for item in cast(list[object], train_info_obj)
+                            if isinstance(item, dict)
+                        ]
+
+                    for item in train_items:
+                        if str(item.get("h_pnr_no", "")).strip() != pnr_no:
+                            continue
+                        if not price or price == "0":
+                            price_candidate = "".join(
+                                ch for ch in str(item.get("h_rsv_amt", "")) if ch.isdigit()
+                            )
+                            if price_candidate:
+                                price = price_candidate
+                        if not wct_no:
+                            wct_candidate = str(item.get("h_wct_no", "")).strip()
+                            if wct_candidate:
+                                wct_no = wct_candidate
+                        break
+                    if (price and price != "0") and wct_no:
+                        break
+
+        if not price or price == "0":
+            raise KorailError("Unable to determine payment amount.")
+        if not wct_no:
+            raise KorailError("Unable to determine payment key (h_wct_no).")
 
         if card_type is None:
             card_type = "J" if len(birthday) <= 6 else "S"
@@ -372,6 +449,6 @@ class KorailAPI:
             "hidIsmtMnthNum1": str(installment),
             "hidAthnDvCd1": card_type,
             "hidAthnVal1": birthday,
-            "hiduserYn": "Y",
+            "hiduserYn": "Y" if smart_ticket else "N",
         }
         return self._api_call(API_PAY, params)

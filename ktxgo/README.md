@@ -35,6 +35,10 @@ keyring set KTX pass      # 비밀번호 (현재 수동 로그인이므로 미�
 ### 카드 정보 (자동결제 사용 시)
 
 ```bash
+# TTY 등록 (권장)
+python3 -m ktxgo --set-card
+
+# 직접 keyring 등록
 keyring set KTX card_number     # 카드번호 (하이픈 없이)
 keyring set KTX card_password   # 카드 비밀번호 앞 2자리
 keyring set KTX birthday        # 생년월일 YYMMDD (개인) / 사업자등록번호 10자리
@@ -51,7 +55,7 @@ keyring set telegram chat_id    # 채팅 ID
 ## 사용법
 
 ```bash
-# 기본 실행 (대화형: 화살표로 출발역/도착역/날짜/시간/좌석선호 선택 + 열차 선택)
+# 기본 실행 (메뉴: 예매 시작 / 카드 등록·수정 / 나가기)
 python3 -m ktxgo
 
 # 옵션 지정 후 대화형 실행
@@ -85,8 +89,10 @@ python3 -m ktxgo --no-interactive
 | `--interactive` / `--no-interactive` | TTY에서 interactive | 날짜/시간/열차 선택 프롬프트 사용 여부 |
 | `--seat` | any | `general` / `special` / `any` / `standing` |
 | `--headless` / `--no-headless` | headless | 브라우저 표시 여부 |
+| `--set-card` | off | TTY에서 카드 정보 등록 후 종료 |
 | `--max-attempts` | 0 (무한) | 최대 검색 시도 횟수 |
 | `--auto-pay` | off | 예약 성공 후 자동 카드결제 |
+| `--smart-ticket` / `--no-smart-ticket` | smart-ticket | 자동결제 시 스마트티켓 발권 여부 |
 | `--telegram` | off | 예약/결제 결과 텔레그램 알림 |
 
 ### 지원 역 목록
@@ -102,8 +108,12 @@ python3 -m ktxgo --no-interactive
  │   └─ 실패 → 브라우저 창 열어 수동 로그인 대기 (5분)
  │            └─ 로그인 성공 → 쿠키 저장 → headless 전환
  │
- ├─ (interactive 모드) 출발/도착/날짜/시간/좌석 입력
- │   └─ 초기 조회 결과에서 예약 시도할 열차 선택 (다중선택 가능)
+ ├─ (interactive 모드) 시작 메뉴
+ │   ├─ 카드 등록/수정
+ │   └─ 예매 시작
+ │      ├─ 출발/도착/날짜/시간 입력
+ │      ├─ 초기 조회 결과에서 예약 시도할 열차 선택 (다중선택 가능)
+ │      └─ 좌석 선호 + 자동결제 여부 + 스마트티켓 발권 여부 확인
  │
  ├─ 매크로 루프 시작
  │   ├─ ScheduleView API로 열차 검색
