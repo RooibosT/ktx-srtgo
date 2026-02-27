@@ -51,10 +51,10 @@ keyring set telegram chat_id    # 채팅 ID
 ## 사용법
 
 ```bash
-# 기본 실행 (서울→부산, 좌석 발견 시 예약)
+# 기본 실행 (대화형: 화살표로 출발역/도착역/날짜/시간/좌석선호 선택 + 열차 선택)
 python3 -m ktxgo
 
-# 옵션 지정
+# 옵션 지정 후 대화형 실행
 python3 -m ktxgo \
   --departure 서울 \
   --arrival 부산 \
@@ -69,6 +69,9 @@ python3 -m ktxgo --no-headless
 
 # 시도 횟수 제한
 python3 -m ktxgo --max-attempts 100
+
+# 기존 방식(비대화형, 조회된 열차 전체 대상)
+python3 -m ktxgo --no-interactive
 ```
 
 ### CLI 옵션
@@ -79,6 +82,7 @@ python3 -m ktxgo --max-attempts 100
 | `--arrival` | 부산 | 도착역 |
 | `--date` | 현재+10분 기준 | 출발일 (YYYYMMDD) |
 | `--time` | 현재+10분 기준 | 출발 시간대 (HH) |
+| `--interactive` / `--no-interactive` | TTY에서 interactive | 날짜/시간/열차 선택 프롬프트 사용 여부 |
 | `--seat` | any | `general` / `special` / `any` / `standing` |
 | `--headless` / `--no-headless` | headless | 브라우저 표시 여부 |
 | `--max-attempts` | 0 (무한) | 최대 검색 시도 횟수 |
@@ -98,9 +102,12 @@ python3 -m ktxgo --max-attempts 100
  │   └─ 실패 → 브라우저 창 열어 수동 로그인 대기 (5분)
  │            └─ 로그인 성공 → 쿠키 저장 → headless 전환
  │
+ ├─ (interactive 모드) 출발/도착/날짜/시간/좌석 입력
+ │   └─ 초기 조회 결과에서 예약 시도할 열차 선택 (다중선택 가능)
+ │
  ├─ 매크로 루프 시작
  │   ├─ ScheduleView API로 열차 검색
- │   ├─ 좌석 있는 열차 발견
+ │   ├─ 선택한 열차(비대화형은 전체) 중 좌석 있는 열차 발견
  │   │   └─ TicketReservation API로 예약
  │   │       ├─ 성공
  │   │       │   ├─ --auto-pay → ReservationPayment API로 결제

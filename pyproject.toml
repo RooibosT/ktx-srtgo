@@ -28,6 +28,10 @@ dependencies = [
 dynamic = ["version"]
 [tool.setuptools_scm]
 
+[tool.setuptools.packages.find]
+include = ["srtgo*", "ktxgo*"]
+exclude = ["tmp*"]
+
 [project.urls]
 Homepage = "https://github.com/lapis42/srtgo"
 

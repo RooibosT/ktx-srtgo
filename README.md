@@ -17,5 +17,40 @@
 > [!WARNING]
 > All commercial and profit-making use of this program is strictly prohibited. Use of this program is at your own risk, and the developers of this program shall not be liable for any liability, including civil or criminal liability. By downloading this program, all users are deemed to agree to the above terms without any objection.
 
+## Quick Start
+
+### 1) Environment Setup (`uv` or `conda`)
+
+```bash
+./install.sh
+```
+
+On first run, `install.sh` asks you to choose:
+- `uv` (creates `.venv`)
+- `conda` (creates `srtgo-env`, configurable via `--env-name`)
+
+Useful options:
+
+```bash
+./install.sh --uv
+./install.sh --conda --env-name my-train-env
+./install.sh --reconfigure
+```
+
+### 2) Run SRTgo
+
+```bash
+srtgo
+```
+
+### 3) Run KTXgo
+
+```bash
+python -m ktxgo
+```
+
+- Interactive mode lets you select departure/arrival/date/time/seat and target trains.
+- For full KTXgo usage, see [ktxgo/README.md](ktxgo/README.md).
+
 ## Acknowledgments
 - This project includes code from [SRT](https://github.com/ryanking13/SRT) by ryanking13, licensed under the MIT License, and [korail2](https://github.com/carpedm20/korail2) by carpedm20, licensed under the BSD License.
