@@ -57,6 +57,12 @@ def _validate_hour(value: str) -> str:
     return f"{hour:02d}"
 
 
+def _validate_adults(value: int) -> int:
+    if value < 1 or value > 9:
+        raise click.BadParameter("adults must be between 1 and 9")
+    return value
+
+
 def _train_key(train: Train) -> TrainKey:
     return (
         train.dep_date,
@@ -101,7 +107,8 @@ def _prompt_conditions(
     arrival: str,
     date: str,
     time_str: str,
-) -> tuple[str, str, str, str]:
+    adults: int,
+) -> tuple[str, str, str, str, int]:
     click.echo("\n대화형 모드: 화살표(↑/↓)로 조회 조건을 선택하세요.")
     now = datetime.now() + timedelta(minutes=10)
     max_days = 31 if now.hour >= 7 else 30
@@ -119,6 +126,7 @@ def _prompt_conditions(
         date_choices.insert(0, (date_dt.strftime("%Y/%m/%d %a (직접지정)"), date))
 
     time_choices = [(f"{hour:02d}시", f"{hour:02d}") for hour in range(24)]
+    adult_choices = [(f"{count}명", count) for count in range(1, 10)]
     while True:
         info = inquirer.prompt(
             [
@@ -146,6 +154,12 @@ def _prompt_conditions(
                     choices=time_choices,
                     default=time_str,
                 ),
+                inquirer.List(
+                    "adults",
+                    message="인원수 선택 (성인, ↕:이동, Enter: 선택, Ctrl-C: 취소)",
+                    choices=adult_choices,
+                    default=adults,
+                ),
             ]
         )
         if not info:
@@ -160,7 +174,8 @@ def _prompt_conditions(
 
         date = _validate_date(str(info["date"]))
         time_str = _validate_hour(str(info["time"]))
-        return departure, arrival, date, time_str
+        adults = _validate_adults(int(info["adults"]))
+        return departure, arrival, date, time_str, adults
 
 
 def _prompt_target_trains(
@@ -169,10 +184,11 @@ def _prompt_target_trains(
     arrival: str,
     date: str,
     time_str: str,
+    adults: int,
 ) -> list[TrainKey]:
     click.echo("\n예약 시도할 열차를 선택하세요.")
     while True:
-        trains = api.search(departure, arrival, date, time_str, adults=1)
+        trains = api.search(departure, arrival, date, time_str, adults=adults)
         if not trains:
             click.echo(f"[{_now()}] 초기 조회 결과가 없습니다.")
             if not click.confirm("같은 조건으로 다시 조회할까요?", default=True):
@@ -247,21 +263,8 @@ def _prompt_reservation_options(
     if not auto_pay:
         return seat, False, default_smart_ticket
 
-    smart_choice = inquirer.prompt(
-        [
-            inquirer.Confirm(
-                "smart_ticket",
-                message="스마트티켓 발권 (코레일톡 앱 이용 시 체크)",
-                default=default_smart_ticket,
-            )
-        ]
-    )
-    if smart_choice is None:
-        click.echo("예매 옵션 입력 중 취소되었습니다.")
-        sys.exit(0)
-
-    smart_ticket = bool(smart_choice.get("smart_ticket", default_smart_ticket))
-    return seat, True, smart_ticket
+    # Keep smart-ticket behavior as a default/CLI setting without asking in TTY.
+    return seat, True, default_smart_ticket
 
 
 def _resolve_targets(trains: list[Train], targets: list[TrainKey]) -> tuple[list[Train], int]:
@@ -565,6 +568,13 @@ def _send_telegram(train: Train, reserve_result: dict[str, object], paid: bool) 
 @click.option("--arrival", default=DEFAULT_ARRIVAL, show_default=True)
 @click.option("--date", default=None, help="YYYYMMDD")
 @click.option("--time", "time_str", default=None, help="HH")
+@click.option(
+    "--adults",
+    default=1,
+    show_default=True,
+    type=click.IntRange(1, 9),
+    help="Number of adult passengers",
+)
 @click.option("--headless/--no-headless", default=True, show_default=True)
 @click.option(
     "--interactive/--no-interactive",
@@ -598,6 +608,7 @@ def main(
     arrival: str,
     date: str | None,
     time_str: str | None,
+    adults: int,
     headless: bool,
     interactive: bool | None,
     max_attempts: int,
@@ -623,6 +634,7 @@ def main(
         date = _validate_date(date)
     if time_str is not None:
         time_str = _validate_hour(time_str)
+    adults = _validate_adults(adults)
     date = date or _fmt_date()
     time_str = time_str or _fmt_hour()
 
@@ -638,8 +650,8 @@ def main(
                 _set_card_interactive()
                 continue
             sys.exit(0)
-        departure, arrival, date, time_str = _prompt_conditions(
-            departure, arrival, date, time_str
+        departure, arrival, date, time_str, adults = _prompt_conditions(
+            departure, arrival, date, time_str, adults
         )
 
     # Graceful Ctrl+C
@@ -660,7 +672,7 @@ def main(
             while True:
                 try:
                     target_trains = _prompt_target_trains(
-                        api, departure, arrival, date, time_str
+                        api, departure, arrival, date, time_str, adults
                     )
                     break
                 except KorailError as exc:
@@ -684,7 +696,8 @@ def main(
                     sys.exit(0)
 
         status_line = (
-            f"KTXgo — {departure} → {arrival}  {date} {time_str}:00  seat={seat}"
+            f"KTXgo — {departure} → {arrival}  {date} {time_str}:00  "
+            f"adults={adults} seat={seat}"
             f"{' auto-pay' if auto_pay else ''}{' telegram' if telegram else ''}"
         )
 
@@ -700,7 +713,7 @@ def main(
                 _render_screen(status_line, target_line, clear_screen=True)
 
             try:
-                trains = api.search(departure, arrival, date, time_str, adults=1)
+                trains = api.search(departure, arrival, date, time_str, adults=adults)
                 consecutive_errors = 0
             except KorailError as exc:
                 consecutive_errors += 1
@@ -744,7 +757,7 @@ def main(
                     f"({train.dep_time}). Reserving ({seat_type})..."
                 )
                 try:
-                    result = api.reserve(train, seat_type=seat_type, adults=1)
+                    result = api.reserve(train, seat_type=seat_type, adults=adults)
                 except KorailError as exc:
                     code = exc.code or ""
                     if code in _SESSION_EXPIRED_CODES:
