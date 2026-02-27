@@ -46,6 +46,7 @@
 `run.sh`는 다음을 자동으로 처리합니다.
 - `install.sh`에서 선택한 환경(`uv`/`conda`) 활성화
 - 화살표 메뉴로 `KTX` / `SRT` 선택 후 실행
+- `KTX` 최초 실행 시 웹 로그인 창이 열리며, 여기서 한 번 로그인해야 합니다.
 
 직접 지정 실행:
 
@@ -53,6 +54,17 @@
 ./run.sh --ktx
 ./run.sh --srt
 ```
+
+### 3) (선택) bash alias 등록
+
+매번 경로를 입력하지 않으려면 `run.sh`를 alias로 등록해 두면 편합니다.
+
+```bash
+echo "alias ktxgo='/home/chan/archive/srtgo/run.sh'" >> ~/.bashrc
+source ~/.bashrc
+```
+
+이후에는 어디서든 `ktxgo`로 실행할 수 있습니다.
 
 ## 개별 실행
 
