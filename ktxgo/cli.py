@@ -4,11 +4,13 @@ import asyncio
 import signal
 import sys
 import time
+import unicodedata
 from datetime import datetime, timedelta
 
 import click
 import inquirer
 import keyring
+from termcolor import colored
 
 from .browser import BrowserManager
 from .config import DEFAULT_ARRIVAL, DEFAULT_DEPARTURE, POLL_INTERVAL_S, STATIONS
@@ -30,6 +32,19 @@ def _fmt_hour() -> str:
 
 def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+def _print_success_banner(
+    title: str,
+    *,
+    color: str = "red",
+    on_color: str = "on_green",
+) -> None:
+    line = "=" * 50
+    click.echo()
+    click.echo(colored(line, color, on_color))
+    click.echo(colored(title.center(50), color, on_color, attrs=["bold"]))
+    click.echo(colored(line, color, on_color))
 
 
 def _normalize_station(name: str) -> str:
@@ -80,11 +95,50 @@ def _train_brief(train: Train) -> str:
     )
 
 
+def _display_width(text: str) -> int:
+    width = 0
+    for ch in text:
+        width += 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
+    return width
+
+
+def _fit_display(text: str, width: int) -> str:
+    if width <= 0:
+        return ""
+    out: list[str] = []
+    current = 0
+    for ch in text:
+        ch_w = 2 if unicodedata.east_asian_width(ch) in {"W", "F"} else 1
+        if current + ch_w > width:
+            break
+        out.append(ch)
+        current += ch_w
+    return "".join(out)
+
+
+def _pad_display(text: str, width: int, *, align: str = "left") -> str:
+    trimmed = _fit_display(text, width)
+    pad = max(0, width - _display_width(trimmed))
+    if align == "right":
+        return (" " * pad) + trimmed
+    return trimmed + (" " * pad)
+
+
+def _format_row(columns: list[tuple[str, int, str]]) -> str:
+    return " ".join(_pad_display(text, width, align=align) for text, width, align in columns)
+
+
 def _train_choice_label(idx: int, train: Train) -> str:
-    return (
-        f"[{idx:>2}] {train.train_no:<5} {train.dep_time}-{train.arr_time} "
-        f"{train.departure}->{train.arrival} "
-        f"일반:{train.general_seat} 특실:{train.special_seat} 입석:{train.standing_seat}"
+    return _format_row(
+        [
+            (f"[{idx}]", 4, "right"),
+            (train.train_no, 6, "right"),
+            (f"{train.dep_time}-{train.arr_time}", 12, "left"),
+            (f"{train.departure}->{train.arrival}", 15, "left"),
+            (f"일반:{train.general_seat}", 14, "left"),
+            (f"특석:{train.special_seat}", 14, "left"),
+            (f"입석:{train.standing_seat}", 14, "left"),
+        ]
     )
 
 
@@ -93,6 +147,7 @@ def _prompt_main_menu() -> str:
         message="메뉴 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
         choices=[
             ("예매 시작", "reserve"),
+            ("역 설정", "station"),
             ("카드 등록/수정", "card"),
             ("나가기", "exit"),
         ],
@@ -102,14 +157,68 @@ def _prompt_main_menu() -> str:
     return str(choice)
 
 
+def _load_visible_stations() -> list[str]:
+    station_key = keyring.get_password("KTX", "station")
+    if not station_key:
+        return list(STATIONS)
+
+    selected = {station.strip() for station in station_key.split(",") if station.strip()}
+    ordered = [station for station in STATIONS if station in selected]
+    return ordered if ordered else list(STATIONS)
+
+
+def _set_visible_stations_interactive() -> bool:
+    defaults = _load_visible_stations()
+    station_info = inquirer.prompt(
+        [
+            inquirer.Checkbox(
+                "stations",
+                message=(
+                    "표시할 역 선택 "
+                    "(↕:이동, Space:선택, Enter:완료, Ctrl-A:전체선택, Ctrl-R:선택해제, Ctrl-C:취소)"
+                ),
+                choices=STATIONS,
+                default=defaults,
+            )
+        ]
+    )
+    if not station_info:
+        click.echo("역 설정이 취소되었습니다.")
+        return False
+
+    selected: list[str] = station_info.get("stations", [])
+    if not selected:
+        click.echo("선택된 역이 없습니다.")
+        return False
+
+    selected_set = set(selected)
+    ordered_selected = [station for station in STATIONS if station in selected_set]
+    selected_stations = ",".join(ordered_selected)
+    keyring.set_password("KTX", "station", selected_stations)
+    click.echo(f"선택된 역: {selected_stations}")
+    return True
+
+
 def _prompt_conditions(
     departure: str,
     arrival: str,
     date: str,
     time_str: str,
     adults: int,
+    stations: list[str],
 ) -> tuple[str, str, str, str, int]:
     click.echo("\n대화형 모드: 화살표(↑/↓)로 조회 조건을 선택하세요.")
+    if len(stations) < 2:
+        click.echo("역 설정에서 최소 2개 역을 선택하세요.")
+        sys.exit(1)
+
+    if departure not in stations:
+        departure = stations[0]
+    if arrival not in stations:
+        arrival = stations[1] if len(stations) > 1 else stations[0]
+    if departure == arrival and len(stations) > 1:
+        arrival = next((station for station in stations if station != departure), stations[0])
+
     now = datetime.now() + timedelta(minutes=10)
     max_days = 31 if now.hour >= 7 else 30
 
@@ -133,13 +242,13 @@ def _prompt_conditions(
                 inquirer.List(
                     "departure",
                     message="출발역 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
-                    choices=STATIONS,
+                    choices=stations,
                     default=departure,
                 ),
                 inquirer.List(
                     "arrival",
                     message="도착역 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
-                    choices=STATIONS,
+                    choices=stations,
                     default=arrival,
                 ),
                 inquirer.List(
@@ -319,9 +428,18 @@ def _pick_seat(train: Train, seat: str) -> str:
 
 
 def _print_results(trains: list[Train]) -> None:
-    header = (
-        "idx train    type       dep->arr        time         "
-        "gen       spe       stnd      price"
+    header = _format_row(
+        [
+            ("idx", 3, "right"),
+            ("train", 6, "right"),
+            ("type", 10, "left"),
+            ("dep->arr", 15, "left"),
+            ("time", 12, "left"),
+            ("gen", 9, "left"),
+            ("spe", 9, "left"),
+            ("stnd", 9, "left"),
+            ("price", 7, "right"),
+        ]
     )
     click.echo(header)
     click.echo("-" * len(header))
@@ -329,11 +447,18 @@ def _print_results(trains: list[Train]) -> None:
         route = f"{train.departure}->{train.arrival}"
         tm = f"{train.dep_time}-{train.arr_time}"
         price = train.price.lstrip("0") or "0"
-        row = (
-            f"{idx:>3} {train.train_no:<8} {train.train_type[:10]:<10} "
-            f"{route[:14]:<14} {tm[:12]:<12}   "
-            f"{train.general_seat[:8]:<9} {train.special_seat[:8]:<9} "
-            f"{train.standing_seat[:8]:<9} {price}"
+        row = _format_row(
+            [
+                (str(idx), 3, "right"),
+                (train.train_no, 6, "right"),
+                (train.train_type, 10, "left"),
+                (route, 15, "left"),
+                (tm, 12, "left"),
+                (train.general_seat, 9, "left"),
+                (train.special_seat, 9, "left"),
+                (train.standing_seat, 9, "left"),
+                (price, 7, "right"),
+            ]
         )
         click.echo(row)
 
@@ -513,9 +638,11 @@ def _do_pay(api: KorailAPI, reserve_result: dict[str, object], smart_ticket: boo
             click.echo("  Reservation is kept. Pay manually before the deadline.")
             return False
 
-        click.echo(f"\n{'=' * 50}")
-        click.echo("Payment successful!")
-        click.echo(f"{'=' * 50}")
+        _print_success_banner(
+            "Payment successful!",
+            color="green",
+            on_color="on_red",
+        )
         for key in ("strResult", "h_msg_txt", "h_pnr_no"):
             if key in pay_result:
                 click.echo(f"  {key}: {pay_result[key]}")
@@ -641,17 +768,22 @@ def main(
     interactive_mode = sys.stdin.isatty() if interactive is None else interactive
     if interactive_mode and not sys.stdin.isatty():
         raise click.UsageError("--interactive requires a TTY")
+    visible_stations = _load_visible_stations()
     if interactive_mode:
         while True:
             action = _prompt_main_menu()
             if action == "reserve":
                 break
+            if action == "station":
+                _set_visible_stations_interactive()
+                visible_stations = _load_visible_stations()
+                continue
             if action == "card":
                 _set_card_interactive()
                 continue
             sys.exit(0)
         departure, arrival, date, time_str, adults = _prompt_conditions(
-            departure, arrival, date, time_str, adults
+            departure, arrival, date, time_str, adults, visible_stations
         )
 
     # Graceful Ctrl+C
@@ -769,9 +901,7 @@ def main(
                     click.echo(f"  → Reserve failed: {exc}")
                     continue
 
-                click.echo(f"\n{'=' * 50}")
-                click.echo("Reservation successful!")
-                click.echo(f"{'=' * 50}")
+                _print_success_banner("Reservation successful!")
                 for key in ("h_pnr_no", "h_rsv_no", "strResult", "h_msg_txt"):
                     if key in result:
                         click.echo(f"  {key}: {result[key]}")
