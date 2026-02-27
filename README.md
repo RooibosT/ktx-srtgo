@@ -1,4 +1,5 @@
-# SRTgo: K-Train (KTX, SRT) Reservation Assistant
+# KTX-SRTgo: K-Train (KTX, SRT) Reservation Assistant
+최근 코레일톡 업데이트로 KTX API에서 사용자 토큰 기반 MACRO 차단 이슈를 해결하기 위해 제작되었습니다.
 [![Upload Python Package](https://github.com/lapis42/srtgo/actions/workflows/python-publish.yml/badge.svg)](https://github.com/lapis42/srtgo/actions/workflows/python-publish.yml)
 [![Downloads](https://static.pepy.tech/badge/srtgo)](https://pepy.tech/project/srtgo)
 [![Downloads](https://static.pepy.tech/badge/srtgo/month)](https://pepy.tech/project/srtgo)
