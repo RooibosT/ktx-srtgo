@@ -18,11 +18,18 @@ from .browser import BrowserManager
 from .config import COOKIE_PATH, DEFAULT_ARRIVAL, DEFAULT_DEPARTURE, POLL_INTERVAL_S, STATIONS
 from .korail import KorailAPI, KorailError, Train
 
+try:
+    import termios
+except ImportError:  # pragma: no cover - non-POSIX platforms
+    termios = None
+
 # Session-expired error codes returned by Korail.
 _SESSION_EXPIRED_CODES = {"P058", "WRT300004", "WRD000003"}
 
 TrainKey = tuple[str, str, str, str, str]
 ReservationPlan = tuple[str, bool]  # (seat_type, waitlist)
+_PROMPT_INPUT_GUARD_S = 0.18
+_LAST_PROMPT_FINISHED_AT: float | None = None
 
 
 def _fmt_date() -> str:
@@ -131,6 +138,48 @@ def _format_row(columns: list[tuple[str, int, str]]) -> str:
     return " ".join(_pad_display(text, width, align=align) for text, width, align in columns)
 
 
+def _flush_tty_input_buffer() -> None:
+    if termios is None or not sys.stdin.isatty():
+        return
+    try:
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except Exception:
+        pass
+
+
+def _prepare_tty_prompt() -> None:
+    global _LAST_PROMPT_FINISHED_AT
+    if not sys.stdin.isatty():
+        return
+    if _LAST_PROMPT_FINISHED_AT is not None:
+        elapsed = time.monotonic() - _LAST_PROMPT_FINISHED_AT
+        if elapsed < _PROMPT_INPUT_GUARD_S:
+            time.sleep(_PROMPT_INPUT_GUARD_S - elapsed)
+    _flush_tty_input_buffer()
+
+
+def _finish_tty_prompt() -> None:
+    global _LAST_PROMPT_FINISHED_AT
+    if sys.stdin.isatty():
+        _LAST_PROMPT_FINISHED_AT = time.monotonic()
+
+
+def _list_input_guarded(*, message: str, choices: list[object], **kwargs: object) -> object:
+    _prepare_tty_prompt()
+    try:
+        return inquirer.list_input(message=message, choices=choices, **kwargs)
+    finally:
+        _finish_tty_prompt()
+
+
+def _prompt_guarded(questions: list[object]) -> dict[str, object] | None:
+    _prepare_tty_prompt()
+    try:
+        return inquirer.prompt(questions)
+    finally:
+        _finish_tty_prompt()
+
+
 def _train_choice_label(idx: int, train: Train) -> str:
     return _format_row(
         [
@@ -147,7 +196,7 @@ def _train_choice_label(idx: int, train: Train) -> str:
 
 
 def _prompt_main_menu() -> str:
-    choice = inquirer.list_input(
+    choice = _list_input_guarded(
         message="메뉴 선택 (↕:이동, Enter: 선택, Ctrl-C: 취소)",
         choices=[
             ("예매 시작", "reserve"),
@@ -245,7 +294,7 @@ def _configure_login_interactive() -> None:
         return
 
     click.echo(f"현재 로그인 정보: {_format_login_profile(profile)}")
-    choice = inquirer.list_input(
+    choice = _list_input_guarded(
         message="로그인 정보 처리",
         choices=[
             ("현재 로그인 정보 유지", "keep"),
@@ -273,7 +322,7 @@ def _load_visible_stations() -> list[str]:
 
 def _set_visible_stations_interactive() -> bool:
     defaults = _load_visible_stations()
-    station_info = inquirer.prompt(
+    station_info = _prompt_guarded(
         [
             inquirer.Checkbox(
                 "stations",
@@ -341,7 +390,7 @@ def _prompt_conditions(
     time_choices = [(f"{hour:02d}시", f"{hour:02d}") for hour in range(24)]
     adult_choices = [(f"{count}명", count) for count in range(1, 10)]
     while True:
-        info = inquirer.prompt(
+        info = _prompt_guarded(
             [
                 inquirer.List(
                     "departure",
@@ -408,7 +457,7 @@ def _prompt_target_trains(
                 sys.exit(0)
             continue
 
-        choice = inquirer.prompt(
+        choice = _prompt_guarded(
             [
                 inquirer.Checkbox(
                     "trains",
@@ -452,7 +501,7 @@ def _prompt_reservation_options(
         ("입석/자유석", "standing"),
     ]
 
-    choice = inquirer.prompt(
+    choice = _prompt_guarded(
         [
             inquirer.List(
                 "seat",
@@ -783,7 +832,7 @@ def _set_card_interactive() -> bool:
         "card_expire": keyring.get_password("KTX", "card_expire") or "",
     }
 
-    card_info = inquirer.prompt(
+    card_info = _prompt_guarded(
         [
             inquirer.Password(
                 "card_number",
