@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from playwright.sync_api import (
     Browser,
@@ -11,7 +10,14 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from .config import COOKIE_PATH, DATA_DIR, NAV_TIMEOUT, SEARCH_URL, STEALTH_SCRIPT
+from .config import (
+    COOKIE_PATH,
+    DATA_DIR,
+    NAV_TIMEOUT,
+    SEARCH_URL,
+    STEALTH_SCRIPT,
+    STORAGE_STATE_PATH,
+)
 
 
 class BrowserManager:
@@ -25,9 +31,14 @@ class BrowserManager:
     def start(self) -> Page:
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.firefox.launch(headless=self._headless)
-        self._context = self._browser.new_context(locale="ko-KR")
+        context_kwargs: dict[str, str] = {"locale": "ko-KR"}
+        if STORAGE_STATE_PATH.is_file():
+            context_kwargs["storage_state"] = str(STORAGE_STATE_PATH)
+        self._context = self._browser.new_context(**context_kwargs)
         self._context.add_init_script(STEALTH_SCRIPT)
-        self._restore_cookies()
+        # Backward compatibility with older cookie-only sessions.
+        if not STORAGE_STATE_PATH.is_file():
+            self._restore_cookies()
         self._page = self._context.new_page()
         self._page.set_default_timeout(NAV_TIMEOUT)
         _ = self._page.goto(SEARCH_URL, wait_until="networkidle", timeout=NAV_TIMEOUT)
@@ -38,12 +49,21 @@ class BrowserManager:
     # ------------------------------------------------------------------
 
     def save_cookies(self) -> None:
-        """Save browser cookies to disk for session reuse."""
+        """Save browser session to disk for reuse."""
         if self._context is None:
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        cookies = self._context.cookies()
-        COOKIE_PATH.write_text(json.dumps(cookies, ensure_ascii=False, indent=2))
+        try:
+            self._context.storage_state(path=str(STORAGE_STATE_PATH))
+        except Exception:
+            pass
+
+        # Keep cookie file for compatibility / fallback.
+        try:
+            cookies = self._context.cookies()
+            COOKIE_PATH.write_text(json.dumps(cookies, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
 
     def _restore_cookies(self) -> None:
         """Restore previously saved cookies into the browser context."""
@@ -59,9 +79,11 @@ class BrowserManager:
             pass
 
     def clear_cookies(self) -> None:
-        """Delete saved cookie file."""
+        """Delete saved session files."""
         if COOKIE_PATH.is_file():
             COOKIE_PATH.unlink()
+        if STORAGE_STATE_PATH.is_file():
+            STORAGE_STATE_PATH.unlink()
 
     # ------------------------------------------------------------------
 

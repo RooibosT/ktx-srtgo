@@ -10,6 +10,7 @@ SEARCH_URL = f"{BASE_URL}/ticket/search/general"
 # Persistent state directory
 DATA_DIR = Path.home() / ".ktxgo"
 COOKIE_PATH = DATA_DIR / "cookies.json"
+STORAGE_STATE_PATH = DATA_DIR / "storage_state.json"
 
 # API Endpoints (relative, called via fetch from browser context)
 API_SCHEDULE = "/classes/com.korail.mobile.seatMovie.ScheduleView"

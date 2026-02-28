@@ -771,7 +771,7 @@ def _print_results(trains: list[Train]) -> None:
 
 def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> KorailAPI:
     """Ensure the session is authenticated. Returns (possibly new) KorailAPI instance."""
-    if api.is_logged_in():
+    if api.wait_for_login_stable(timeout_s=0.8, interval_s=0.25, stable_checks=1):
         click.echo(f"[{_now()}] Logged in via saved session.")
         return api
 
@@ -800,8 +800,12 @@ def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> Ko
         manager._headless = True
         manager.start()
         api = KorailAPI(manager.page)
-        if not api.is_logged_in():
-            click.echo("Saved session expired immediately. Try --no-headless.")
+        if not api.wait_for_login_stable(
+            timeout_s=3.0,
+            interval_s=0.35,
+            stable_checks=2,
+        ):
+            click.echo("Saved session not ready. Try --no-headless.")
             sys.exit(1)
 
     return api

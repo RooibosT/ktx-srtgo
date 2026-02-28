@@ -180,11 +180,39 @@ class KorailAPI:
         _ = self.page.goto(LOGIN_URL, wait_until="networkidle")
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            if self.is_logged_in():
+            if self.wait_for_login_stable(
+                timeout_s=0.6,
+                interval_s=0.3,
+                stable_checks=2,
+            ):
                 _ = self.page.goto(SEARCH_URL, wait_until="networkidle")
                 return True
-            time.sleep(2.0)
+            time.sleep(1.0)
         return False
+
+    def wait_for_login_stable(
+        self,
+        *,
+        timeout_s: float = 3.0,
+        interval_s: float = 0.35,
+        stable_checks: int = 2,
+    ) -> bool:
+        """Check login status with short retries to absorb session propagation delay."""
+        required = max(1, stable_checks)
+        streak = 0
+        deadline = time.monotonic() + max(0.0, timeout_s)
+
+        while True:
+            if self.is_logged_in():
+                streak += 1
+                if streak >= required:
+                    return True
+            else:
+                streak = 0
+
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(max(0.05, interval_s))
 
     def search(
         self,
