@@ -73,7 +73,7 @@ source ~/.bashrc
 직접 커맨드로 실행할 수도 있습니다.
 
 ```bash
-srtgo
+python -m srtgo.srtgo
 python -m ktxgo
 ```
 

@@ -103,7 +103,11 @@ Activate:
   source "${ROOT_DIR}/.venv/bin/activate"
 
 Run:
-  srtgo
+  ./run.sh
+  
+  or 
+  
+  python -m srtgo.srtgo
   python -m ktxgo
 EOF
 }
@@ -139,7 +143,11 @@ Activate:
   conda activate "${CONDA_ENV_NAME}"
 
 Run:
-  srtgo
+  ./run.sh
+  
+  or 
+  
+  python -m srtgo.srtgo
   python -m ktxgo
 EOF
 }
