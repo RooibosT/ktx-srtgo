@@ -2,7 +2,7 @@
 
 Playwright(Firefox) 기반 KTX 예매 자동화 CLI.
 
-코레일 웹사이트의 DynaPath 매크로 차단을 우회하여 열차 검색 → 좌석 예매 → 자동결제 → 텔레그램 알림까지 자동화합니다.
+코레일 웹사이트의 DynaPath 매크로 차단을 우회하여 열차 검색 → 좌석 예매/예약대기 → 자동결제 → 텔레그램 알림까지 자동화합니다.
 
 > **주의**: 본 프로그램의 모든 상업적·영리적 이용을 엄격히 금지합니다. 사용에 따른 모든 책임은 사용자에게 있으며, 개발자는 어떠한 책임도 부담하지 않습니다.
 
@@ -117,14 +117,15 @@ python3 -m ktxgo --no-interactive
  │
  ├─ 매크로 루프 시작
  │   ├─ ScheduleView API로 열차 검색
- │   ├─ 선택한 열차(비대화형은 전체) 중 좌석 있는 열차 발견
- │   │   └─ TicketReservation API로 예약
+ │   ├─ 선택한 열차(비대화형은 전체) 중
+ │   │   ├─ 좌석 있으면 TicketReservation API(`txtJobId=1101`)로 예매
+ │   │   └─ 좌석 매진 + 예약대기 가능이면 TicketReservation API(`txtJobId=1102`)로 예약대기 신청
  │   │       ├─ 성공
- │   │       │   ├─ --auto-pay → ReservationPayment API로 결제
+ │   │       │   ├─ 좌석 예매 + --auto-pay → ReservationPayment API로 결제
  │   │       │   ├─ --telegram → 텔레그램 알림 전송
  │   │       │   └─ 종료
  │   │       └─ 실패 → 다음 열차 시도
- │   └─ 좌석 없음 → 1.2초 대기 후 재검색
+ │   └─ 좌석/예약대기 모두 불가 → 1.2초 대기 후 재검색
  │
  └─ 세션 만료 감지 시 자동 재인증
 ```

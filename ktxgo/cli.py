@@ -22,6 +22,7 @@ from .korail import KorailAPI, KorailError, Train
 _SESSION_EXPIRED_CODES = {"P058", "WRT300004", "WRD000003"}
 
 TrainKey = tuple[str, str, str, str, str]
+ReservationPlan = tuple[str, bool]  # (seat_type, waitlist)
 
 
 def _fmt_date() -> str:
@@ -140,6 +141,7 @@ def _train_choice_label(idx: int, train: Train) -> str:
             (f"일반:{train.general_seat}", 14, "left"),
             (f"특석:{train.special_seat}", 14, "left"),
             (f"입석:{train.standing_seat}", 14, "left"),
+            (f"예약대기:{train.waiting_status}", 14, "left"),
         ]
     )
 
@@ -651,26 +653,33 @@ def _show_reservations_interactive() -> None:
         click.echo("\n발권 내역 0건")
 
 
-def _seat_available(train: Train, seat: str) -> bool:
-    if seat == "general":
-        return train.has_general
-    if seat == "special":
-        return train.has_special
+def _reservation_plan(train: Train, seat: str) -> ReservationPlan | None:
     if seat == "standing":
-        return train.has_standing
-    return train.has_any_seat
+        if train.has_standing:
+            return "general", False
+        return None
 
-
-def _pick_seat(train: Train, seat: str) -> str:
     if seat == "general":
-        return "general"
+        if train.has_general:
+            return "general", False
+        if train.has_waiting_list:
+            return "general", True
+        return None
+
     if seat == "special":
-        return "special"
-    if seat == "standing":
-        return "general"
+        if train.has_special:
+            return "special", False
+        if train.has_waiting_list:
+            return "special", True
+        return None
+
     if train.has_general:
-        return "general"
-    return "special"
+        return "general", False
+    if train.has_special:
+        return "special", False
+    if train.has_waiting_list:
+        return "general", True
+    return None
 
 
 def _print_results(trains: list[Train]) -> None:
@@ -684,6 +693,7 @@ def _print_results(trains: list[Train]) -> None:
             ("gen", 9, "left"),
             ("spe", 9, "left"),
             ("stnd", 9, "left"),
+            ("예약대기", 9, "left"),
             ("price", 7, "right"),
         ]
     )
@@ -703,6 +713,7 @@ def _print_results(trains: list[Train]) -> None:
                 (train.general_seat, 9, "left"),
                 (train.special_seat, 9, "left"),
                 (train.standing_seat, 9, "left"),
+                (train.waiting_status, 9, "left"),
                 (price, 7, "right"),
             ]
         )
@@ -899,7 +910,13 @@ def _do_pay(api: KorailAPI, reserve_result: dict[str, object], smart_ticket: boo
         return False
 
 
-def _send_telegram(train: Train, reserve_result: dict[str, object], paid: bool) -> None:
+def _send_telegram(
+    train: Train,
+    reserve_result: dict[str, object],
+    paid: bool,
+    *,
+    waitlist: bool = False,
+) -> None:
     """Send reservation/payment notification via Telegram."""
     token = keyring.get_password("telegram", "token")
     chat_id = keyring.get_password("telegram", "chat_id")
@@ -908,7 +925,10 @@ def _send_telegram(train: Train, reserve_result: dict[str, object], paid: bool) 
         return
 
     pnr = reserve_result.get("h_pnr_no", "?")
-    status = "예약+결제 완료" if paid else "예약 완료 (미결제)"
+    if waitlist:
+        status = "예약대기 신청완료"
+    else:
+        status = "예약+결제 완료" if paid else "예약 완료 (미결제)"
     dep_date = train.dep_date
     formatted_date = f"{dep_date[:4]}-{dep_date[4:6]}-{dep_date[6:]}" if len(dep_date) == 8 else dep_date
     dep_time = train.dep_time
@@ -1135,15 +1155,27 @@ def main(
                     continue
 
             for train in candidate_trains:
-                if not _seat_available(train, seat):
+                plan = _reservation_plan(train, seat)
+                if plan is None:
                     continue
-                seat_type = _pick_seat(train, seat)
-                click.echo(
-                    f"\n[{_now()}] Seat found: {train.train_no} "
-                    f"({train.dep_time}). Reserving ({seat_type})..."
-                )
+                seat_type, waitlist = plan
+                if waitlist:
+                    click.echo(
+                        f"\n[{_now()}] 예약대기 가능: {train.train_no} "
+                        f"({train.dep_time}). 예약대기 신청 ({seat_type})..."
+                    )
+                else:
+                    click.echo(
+                        f"\n[{_now()}] Seat found: {train.train_no} "
+                        f"({train.dep_time}). Reserving ({seat_type})..."
+                    )
                 try:
-                    result = api.reserve(train, seat_type=seat_type, adults=adults)
+                    result = api.reserve(
+                        train,
+                        seat_type=seat_type,
+                        adults=adults,
+                        waitlist=waitlist,
+                    )
                 except KorailError as exc:
                     code = exc.code or ""
                     if code in _SESSION_EXPIRED_CODES:
@@ -1155,19 +1187,24 @@ def main(
                     click.echo(f"  → Reserve failed: {exc}")
                     continue
 
-                _print_success_banner("Reservation successful!")
+                if waitlist:
+                    _print_success_banner("예약대기 신청완료")
+                else:
+                    _print_success_banner("Reservation successful!")
                 for key in ("h_pnr_no", "h_rsv_no", "strResult", "h_msg_txt"):
                     if key in result:
                         click.echo(f"  {key}: {result[key]}")
 
                 # Auto-pay
                 paid = False
-                if auto_pay:
+                if auto_pay and not waitlist:
                     paid = _do_pay(api, result, smart_ticket)
+                elif auto_pay and waitlist:
+                    click.echo(f"[{_now()}] 예약대기는 자동결제를 지원하지 않습니다.")
 
                 # Telegram notification
                 if telegram:
-                    _send_telegram(train, result, paid)
+                    _send_telegram(train, result, paid, waitlist=waitlist)
 
                 return
 

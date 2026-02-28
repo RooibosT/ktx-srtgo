@@ -20,6 +20,7 @@ from .config import (
     MOBILE_KEY,
     MOBILE_VERSION,
     RSV_AVAILABLE,
+    RSV_WAITING,
     SEARCH_URL,
     TRAIN_GROUP_ALL,
     TRAIN_GROUP_KTX,
@@ -47,6 +48,8 @@ class Train:
     special_seat: str
     special_code: str
     standing_seat: str
+    waiting_seat: str
+    waiting_code: str
     price: str
     raw: dict[str, str]
 
@@ -65,6 +68,28 @@ class Train:
     @property
     def has_standing(self) -> bool:
         return self.raw.get("h_stnd_rsv_cd", "") == RSV_AVAILABLE
+
+    @property
+    def has_waiting_list(self) -> bool:
+        code = self.waiting_code.strip()
+        if code.isdigit():
+            code = code.zfill(2)
+        if code == RSV_WAITING:
+            return True
+
+        name = self.waiting_seat.strip()
+        if not name:
+            return False
+        if "가능" in name and not any(token in name for token in ("불가", "없", "마감")):
+            return True
+        return False
+
+    @property
+    def waiting_status(self) -> str:
+        name = self.waiting_seat.strip()
+        if name:
+            return name
+        return "가능" if self.has_waiting_list else "불가"
 
     @classmethod
     def from_schedule(cls, row: dict[str, object]) -> Train:
@@ -85,6 +110,8 @@ class Train:
             special_seat=normalized.get("h_spe_rsv_nm", ""),
             special_code=normalized.get("h_spe_rsv_cd", ""),
             standing_seat=normalized.get("h_stnd_rsv_nm", ""),
+            waiting_seat=normalized.get("h_wait_rsv_nm", ""),
+            waiting_code=normalized.get("h_wait_rsv_flg", normalized.get("h_wait_rsv_cd", "")),
             price=normalized.get("h_rcvd_amt", ""),
             raw=normalized,
         )
@@ -215,6 +242,7 @@ class KorailAPI:
         train: Train,
         seat_type: str = "general",
         adults: int = 1,
+        waitlist: bool = False,
     ) -> dict[str, object]:
         seat_code = "1" if seat_type == "general" else "2"
         dep_time = str(
@@ -228,7 +256,7 @@ class KorailAPI:
             "Device": "BH",
             "Version": "999999999",
             "txtMenuId": "11",
-            "txtJobId": "1101",
+            "txtJobId": "1102" if waitlist else "1101",
             "txtGdNo": "",
             "hidFreeFlg": "N",
             "txtTotPsgCnt": str(adults),
