@@ -86,3 +86,12 @@ STATIONS = [
 ]
 DEFAULT_DEPARTURE = "서울"
 DEFAULT_ARRIVAL = "부산"
+DEFAULT_VISIBLE_STATIONS = [
+    "서울",
+    "용산",
+    "광명",
+    "수원",
+    "대전",
+    "동대구",
+    "부산",
+]

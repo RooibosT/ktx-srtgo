@@ -15,7 +15,14 @@ from termcolor import colored
 from srtgo.keyring_bootstrap import configure_keyring_backend
 
 from .browser import BrowserManager
-from .config import COOKIE_PATH, DEFAULT_ARRIVAL, DEFAULT_DEPARTURE, POLL_INTERVAL_S, STATIONS
+from .config import (
+    COOKIE_PATH,
+    DEFAULT_ARRIVAL,
+    DEFAULT_DEPARTURE,
+    DEFAULT_VISIBLE_STATIONS,
+    POLL_INTERVAL_S,
+    STATIONS,
+)
 from .korail import KorailAPI, KorailError, Train
 
 try:
@@ -313,7 +320,7 @@ def _configure_login_interactive() -> None:
 def _load_visible_stations() -> list[str]:
     station_key = keyring.get_password("KTX", "station")
     if not station_key:
-        return list(STATIONS)
+        return [station for station in STATIONS if station in DEFAULT_VISIBLE_STATIONS]
 
     selected = {station.strip() for station in station_key.split(",") if station.strip()}
     ordered = [station for station in STATIONS if station in selected]
