@@ -62,7 +62,7 @@
 매번 경로를 입력하지 않으려면 `run.sh`를 alias로 등록해 두면 편합니다.
 
 ```bash
-echo "alias ktxgo='/home/chan/archive/srtgo/run.sh'" >> ~/.bashrc
+echo "alias ktxgo='<path>/ktx-srtgo/run.sh'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
