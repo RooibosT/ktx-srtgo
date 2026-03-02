@@ -6,6 +6,7 @@ import sys
 import time
 import unicodedata
 from datetime import datetime, timedelta
+from typing import cast
 
 import click
 import inquirer
@@ -143,7 +144,9 @@ def _pad_display(text: str, width: int, *, align: str = "left") -> str:
 
 
 def _format_row(columns: list[tuple[str, int, str]]) -> str:
-    return " ".join(_pad_display(text, width, align=align) for text, width, align in columns)
+    return " ".join(
+        _pad_display(text, width, align=align) for text, width, align in columns
+    )
 
 
 def _flush_tty_input_buffer() -> None:
@@ -172,7 +175,9 @@ def _finish_tty_prompt() -> None:
         _LAST_PROMPT_FINISHED_AT = time.monotonic()
 
 
-def _list_input_guarded(*, message: str, choices: list[object], **kwargs: object) -> object:
+def _list_input_guarded(
+    *, message: str, choices: list[object], **kwargs: object
+) -> object:
     _prepare_tty_prompt()
     try:
         return inquirer.list_input(message=message, choices=choices, **kwargs)
@@ -288,7 +293,9 @@ def _set_login_credentials_interactive() -> bool:
 
     keyring.set_password("KTX", "id", login_id)
     keyring.set_password("KTX", "pass", login_pass)
-    click.echo(f"자동로그인 계정이 저장되었습니다. (회원번호: {_mask_login_id(login_id)})")
+    click.echo(
+        f"자동로그인 계정이 저장되었습니다. (회원번호: {_mask_login_id(login_id)})"
+    )
     return True
 
 
@@ -322,7 +329,11 @@ def _login_and_save_session(force_relogin: bool = False) -> bool:
             click.echo(f"[{_now()}] 브라우저에서 로그인하세요. (5분 제한)")
             if not api.login_manual(timeout_s=300):
                 click.echo("로그인 시간이 초과되었습니다.")
-                if force_relogin and backup_cookie is not None and not COOKIE_PATH.is_file():
+                if (
+                    force_relogin
+                    and backup_cookie is not None
+                    and not COOKIE_PATH.is_file()
+                ):
                     COOKIE_PATH.parent.mkdir(parents=True, exist_ok=True)
                     COOKIE_PATH.write_text(backup_cookie)
                 if (
@@ -435,7 +446,9 @@ def _load_visible_stations() -> list[str]:
     if not station_key:
         return [station for station in STATIONS if station in DEFAULT_VISIBLE_STATIONS]
 
-    selected = {station.strip() for station in station_key.split(",") if station.strip()}
+    selected = {
+        station.strip() for station in station_key.split(",") if station.strip()
+    }
     ordered = [station for station in STATIONS if station in selected]
     return ordered if ordered else list(STATIONS)
 
@@ -459,7 +472,12 @@ def _set_visible_stations_interactive() -> bool:
         click.echo("역 설정이 취소되었습니다.")
         return False
 
-    selected: list[str] = station_info.get("stations", [])
+    selected_obj = station_info.get("stations", [])
+    selected: list[str] = (
+        [str(station) for station in selected_obj]
+        if isinstance(selected_obj, list)
+        else []
+    )
     if not selected:
         click.echo("선택된 역이 없습니다.")
         return False
@@ -490,7 +508,9 @@ def _prompt_conditions(
     if arrival not in stations:
         arrival = stations[1] if len(stations) > 1 else stations[0]
     if departure == arrival and len(stations) > 1:
-        arrival = next((station for station in stations if station != departure), stations[0])
+        arrival = next(
+            (station for station in stations if station != departure), stations[0]
+        )
 
     now = datetime.now() + timedelta(minutes=10)
     max_days = 31 if now.hour >= 7 else 30
@@ -556,7 +576,8 @@ def _prompt_conditions(
 
         date = _validate_date(str(info["date"]))
         time_str = _validate_hour(str(info["time"]))
-        adults = _validate_adults(int(info["adults"]))
+        adults_raw = info.get("adults", adults)
+        adults = _validate_adults(int(str(adults_raw)))
         return departure, arrival, date, time_str, adults
 
 
@@ -597,7 +618,12 @@ def _prompt_target_trains(
             click.echo("열차 선택이 취소되었습니다.")
             sys.exit(0)
 
-        selected_indices: list[int] = choice.get("trains", [])
+        selected_indices_obj = choice.get("trains", [])
+        selected_indices: list[int] = (
+            [int(str(idx)) for idx in cast(list[object], selected_indices_obj)]
+            if isinstance(selected_indices_obj, list)
+            else []
+        )
         if not selected_indices:
             click.echo("선택한 열차가 없습니다.")
             if not click.confirm("다시 선택할까요?", default=True):
@@ -649,7 +675,9 @@ def _prompt_reservation_options(
     return seat, True, default_smart_ticket
 
 
-def _resolve_targets(trains: list[Train], targets: list[TrainKey]) -> tuple[list[Train], int]:
+def _resolve_targets(
+    trains: list[Train], targets: list[TrainKey]
+) -> tuple[list[Train], int]:
     train_by_key = {_train_key(train): train for train in trains}
     found: list[Train] = []
     missing = 0
@@ -670,7 +698,9 @@ def _target_summary(targets: list[TrainKey] | None) -> str | None:
     )
 
 
-def _render_screen(status_line: str, target_line: str | None, clear_screen: bool) -> None:
+def _render_screen(
+    status_line: str, target_line: str | None, clear_screen: bool
+) -> None:
     if clear_screen:
         click.clear()
     click.echo(status_line)
@@ -758,9 +788,7 @@ def _print_reservations(
         else:
             limit_date = _first_non_empty(row, ("h_ntisu_lmt_dt", "ntisuLmtDt"))
             limit_time = _first_non_empty(row, ("h_ntisu_lmt_tm", "ntisuLmtTm"))
-            is_waiting = (
-                limit_date in {"", "00000000"} or limit_time in {"", "235959"}
-            )
+            is_waiting = limit_date in {"", "00000000"} or limit_time in {"", "235959"}
             limit = "예약대기" if is_waiting else _fmt_datetime(limit_date, limit_time)
 
         amount = _fmt_amount(
@@ -920,24 +948,8 @@ def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> Ko
         masked_id = _mask_login_id(login_id)
         if manager._headless:
             click.echo(
-                f"[{_now()}] Saved session is invalid. Trying auto-login ({masked_id})..."
-            )
-            if api.login_auto(login_id, login_pass, timeout_s=25):
-                manager.save_cookies()
-                click.echo(f"[{_now()}] Auto-login successful — session saved.")
-                return api
-
-            reason = api.last_auto_login_error or "unknown"
-            detail = (api.last_auto_login_detail or "").strip()
-            click.echo(
-                f"[{_now()}] Auto-login failed in current browser mode. reason={reason}"
-            )
-            if detail:
-                click.echo(f"[{_now()}] Auto-login detail: {detail}")
-
-            # Avoid repeated macro popups in visible mode.
-            click.echo(
-                f"[{_now()}] Switching to visible browser for assisted login..."
+                f"[{_now()}] Saved session is invalid. "
+                f"Using visible assisted auto-login ({masked_id})..."
             )
             api = _restart_browser(headed=True)
         else:
@@ -947,9 +959,14 @@ def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> Ko
 
         prefilled = api.prefill_login_form(login_id, login_pass)
         if prefilled:
+            click.echo(f"[{_now()}] 로그인 정보 자동입력 완료 ({masked_id}).")
             click.echo(
-                f"[{_now()}] 로그인 정보 자동입력 완료 ({masked_id}). "
-                "비밀번호 칸을 한 번 클릭한 뒤 로그인 버튼을 눌러주세요."
+                colored(
+                    "[로그인 필요] 비밀번호 칸을 한 번 클릭한 뒤 로그인 버튼을 직접 눌러주세요.",
+                    "white",
+                    "on_red",
+                    attrs=["bold"],
+                )
             )
             if not api.login_manual(timeout_s=300, open_login_page=False):
                 click.echo("Login timed out.")
@@ -1066,9 +1083,7 @@ def _ensure_card_for_auto_pay() -> bool:
     if _load_card() is not None:
         return True
 
-    click.echo(
-        "자동결제를 선택했지만 카드 정보가 등록되어 있지 않습니다."
-    )
+    click.echo("자동결제를 선택했지만 카드 정보가 등록되어 있지 않습니다.")
     if click.confirm("지금 카드 정보를 등록할까요?", default=True):
         if _set_card_interactive() and _load_card() is not None:
             return True
@@ -1083,7 +1098,9 @@ def _ensure_card_for_auto_pay() -> bool:
     return False
 
 
-def _do_pay(api: KorailAPI, reserve_result: dict[str, object], smart_ticket: bool) -> bool:
+def _do_pay(
+    api: KorailAPI, reserve_result: dict[str, object], smart_ticket: bool
+) -> bool:
     """Attempt auto-payment. Returns True on success."""
     card = _load_card()
     if card is None:
@@ -1113,7 +1130,9 @@ def _do_pay(api: KorailAPI, reserve_result: dict[str, object], smart_ticket: boo
         )
         pay_msg = str(pay_result.get("h_msg_txt", "")).strip()
         # Korail may return strResult=SUCC with an error message.
-        if pay_msg and any(token in pay_msg for token in ("오류", "실패", "불가", "invalid", "error")):
+        if pay_msg and any(
+            token in pay_msg for token in ("오류", "실패", "불가", "invalid", "error")
+        ):
             click.echo(f"[{_now()}] Payment failed: {pay_msg}")
             click.echo("  Reservation is kept. Pay manually before the deadline.")
             return False
@@ -1153,9 +1172,15 @@ def _send_telegram(
     else:
         status = "예약+결제 완료" if paid else "예약 완료 (미결제)"
     dep_date = train.dep_date
-    formatted_date = f"{dep_date[:4]}-{dep_date[4:6]}-{dep_date[6:]}" if len(dep_date) == 8 else dep_date
+    formatted_date = (
+        f"{dep_date[:4]}-{dep_date[4:6]}-{dep_date[6:]}"
+        if len(dep_date) == 8
+        else dep_date
+    )
     dep_time = train.dep_time
-    formatted_time = f"{dep_time[:2]}:{dep_time[2:4]}" if len(dep_time) >= 4 else dep_time
+    formatted_time = (
+        f"{dep_time[:2]}:{dep_time[2:4]}" if len(dep_time) >= 4 else dep_time
+    )
 
     text = (
         f"[KTXgo] {status}\n"
@@ -1211,14 +1236,18 @@ def _send_telegram(
     default=False,
     help="Configure saved card info in keyring and exit",
 )
-@click.option("--auto-pay", is_flag=True, default=False, help="Auto-pay after reservation")
+@click.option(
+    "--auto-pay", is_flag=True, default=False, help="Auto-pay after reservation"
+)
 @click.option(
     "--smart-ticket/--no-smart-ticket",
     default=True,
     show_default=True,
     help="Smart-ticket issuance option for auto-pay",
 )
-@click.option("--telegram", is_flag=True, default=False, help="Send Telegram notification")
+@click.option(
+    "--telegram", is_flag=True, default=False, help="Send Telegram notification"
+)
 def main(
     departure: str,
     arrival: str,
@@ -1368,7 +1397,9 @@ def main(
 
             candidate_trains = trains
             if target_trains is not None:
-                candidate_trains, missing_count = _resolve_targets(trains, target_trains)
+                candidate_trains, missing_count = _resolve_targets(
+                    trains, target_trains
+                )
                 if missing_count:
                     click.echo(
                         f"Selected trains not present now: {missing_count}/{len(target_trains)}"

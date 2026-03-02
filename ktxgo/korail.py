@@ -80,7 +80,9 @@ class Train:
         name = self.waiting_seat.strip()
         if not name:
             return False
-        if "가능" in name and not any(token in name for token in ("불가", "없", "마감")):
+        if "가능" in name and not any(
+            token in name for token in ("불가", "없", "마감")
+        ):
             return True
         return False
 
@@ -111,7 +113,9 @@ class Train:
             special_code=normalized.get("h_spe_rsv_cd", ""),
             standing_seat=normalized.get("h_stnd_rsv_nm", ""),
             waiting_seat=normalized.get("h_wait_rsv_nm", ""),
-            waiting_code=normalized.get("h_wait_rsv_flg", normalized.get("h_wait_rsv_cd", "")),
+            waiting_code=normalized.get(
+                "h_wait_rsv_flg", normalized.get("h_wait_rsv_cd", "")
+            ),
             price=normalized.get("h_rcvd_amt", ""),
             raw=normalized,
         )
@@ -450,6 +454,83 @@ class KorailAPI:
             return False
         return True
 
+    def submit_prefilled_login(
+        self, timeout_s: int = 25, max_attempts: int = 3
+    ) -> bool:
+        self.last_auto_login_error = None
+        self.last_auto_login_detail = None
+        dialog_messages: list[str] = []
+
+        def _on_dialog(dialog: object) -> None:
+            try:
+                msg = str(getattr(dialog, "message", lambda: "")()).strip()
+            except Exception:
+                msg = ""
+            if msg:
+                dialog_messages.append(msg)
+            try:
+                _ = getattr(dialog, "accept")()
+            except Exception:
+                pass
+
+        self.page.on("dialog", _on_dialog)
+        try:
+            attempts = max(1, min(max_attempts, 2))
+            for attempt_idx in range(attempts):
+                pw_input = self.page.locator("input#password")
+                login_btn = self.page.locator(
+                    "section.loginWrap div.mem_wrap div.btnWrap > button.btn_bn-depblue"
+                )
+                if pw_input.count() == 0 or login_btn.count() == 0:
+                    self.last_auto_login_error = "submit_not_found"
+                    self.last_auto_login_detail = (
+                        "password/login button not found in prefill flow"
+                    )
+                    return False
+
+                try:
+                    pw_input.first.click(timeout=2_000)
+                    self.page.wait_for_timeout(780 + (attempt_idx * 240))
+                    login_btn.first.click(timeout=2_000)
+                    self.last_auto_login_detail = (
+                        "submit_method=human_like_pw_click_then_login_click"
+                    )
+                except Exception:
+                    self.last_auto_login_error = "submit_click_failed"
+                    self.last_auto_login_detail = (
+                        "failed to click password or login button"
+                    )
+                    return False
+
+                if self._wait_login_after_submit(min(12.0, float(timeout_s))):
+                    self.last_auto_login_error = None
+                    return True
+
+                latest_dialog = dialog_messages[-1] if dialog_messages else ""
+                if "통신 중 에러" in latest_dialog:
+                    self.last_auto_login_error = "comm_error_after_submit"
+                    self.last_auto_login_detail = (
+                        f"attempt={attempt_idx + 1} dialog={latest_dialog}"
+                    )
+                    try:
+                        pw_input.first.click(timeout=1_500)
+                        self.page.wait_for_timeout(500)
+                    except Exception:
+                        pass
+                    continue
+
+                self.last_auto_login_error = "login_check_failed"
+                if not self.last_auto_login_detail:
+                    self.last_auto_login_detail = f"attempt={attempt_idx + 1} submitted but login was not confirmed"
+
+            if not self.last_auto_login_detail and dialog_messages:
+                self.last_auto_login_detail = f"dialog: {dialog_messages[-1]}"
+            if not self.last_auto_login_detail:
+                self.last_auto_login_detail = "prefill submit did not confirm login"
+            return False
+        finally:
+            self.page.remove_listener("dialog", _on_dialog)
+
     def _api_call(self, endpoint: str, params: dict[str, str]) -> dict[str, object]:
         payload = cast(
             dict[str, object],
@@ -499,7 +580,9 @@ class KorailAPI:
 
         return data
 
-    def login_manual(self, timeout_s: int = 300, *, open_login_page: bool = True) -> bool:
+    def login_manual(
+        self, timeout_s: int = 300, *, open_login_page: bool = True
+    ) -> bool:
         """Navigate to login page and wait for user to log in manually.
 
         DynaPath blocks programmatic login API calls, so the user must
@@ -584,9 +667,7 @@ class KorailAPI:
             except Exception:
                 return
             if "MACRO ERROR" in text:
-                macro_error_msg = (
-                    "dynaPath blocked automated submit with MACRO ERROR."
-                )
+                macro_error_msg = "dynaPath blocked automated submit with MACRO ERROR."
 
         self.page.on("dialog", _on_dialog)
         self.page.on("response", _on_response)
@@ -712,7 +793,9 @@ class KorailAPI:
                     try:
                         near_submit.click(timeout=1_800)
                         submit_attempted = True
-                        self.last_auto_login_detail = "submit_method=playwright_near_click"
+                        self.last_auto_login_detail = (
+                            "submit_method=playwright_near_click"
+                        )
                     except Exception:
                         pass
                     else:
@@ -735,12 +818,16 @@ class KorailAPI:
                             self.page.remove_listener("response", _on_response)
                             return True
 
-                submit_btn = scoped_submit or self._pick_visible_locator(frame, submit_selectors)
+                submit_btn = scoped_submit or self._pick_visible_locator(
+                    frame, submit_selectors
+                )
                 if submit_btn is not None:
                     try:
                         submit_btn.click(timeout=1_800)
                         submit_attempted = True
-                        self.last_auto_login_detail = "submit_method=playwright_submit_click"
+                        self.last_auto_login_detail = (
+                            "submit_method=playwright_submit_click"
+                        )
                     except Exception:
                         pass
                     else:
@@ -800,7 +887,9 @@ class KorailAPI:
                         }"""
                         )
                         submit_attempted = True
-                        self.last_auto_login_detail = "submit_method=form_request_submit"
+                        self.last_auto_login_detail = (
+                            "submit_method=form_request_submit"
+                        )
                     except Exception:
                         pass
                     else:
@@ -821,9 +910,7 @@ class KorailAPI:
                 if not submit_attempted:
                     self.last_auto_login_error = "submit_failed"
                     if not self.last_auto_login_detail:
-                        self.last_auto_login_detail = (
-                            "Login submit control not found/clickable and Enter submit failed."
-                        )
+                        self.last_auto_login_detail = "Login submit control not found/clickable and Enter submit failed."
                     continue
 
                 self.last_auto_login_error = "login_check_failed"
@@ -1316,7 +1403,7 @@ class KorailAPI:
                 if item_pnr and item_pnr != pnr_no:
                     return
 
-            if (not price or price == "0"):
+            if not price or price == "0":
                 for key in ("h_rsv_amt", "h_rcvd_amt", "hidPayAmount"):
                     candidate = _digit_only(item.get(key, ""))
                     if candidate and candidate != "0":
