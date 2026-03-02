@@ -29,7 +29,7 @@ playwright install firefox
 
 ```bash
 keyring set KTX id        # 회원번호
-keyring set KTX pass      # 비밀번호 (현재 수동 로그인이므로 미사용, 향후 대비)
+keyring set KTX pass      # 비밀번호 (세션 만료 시 Playwright 자동로그인에 사용)
 ```
 
 ### 카드 정보 (자동결제 사용 시)
@@ -105,8 +105,10 @@ python3 -m ktxgo --no-interactive
 시작
  ├─ 저장된 쿠키로 로그인 확인
  │   ├─ 성공 → headless 모드로 진행
- │   └─ 실패 → 브라우저 창 열어 수동 로그인 대기 (5분)
- │            └─ 로그인 성공 → 쿠키 저장 → headless 전환
+ │   └─ 실패 → 저장된 계정(KTX id/pass)으로 Playwright 자동로그인 시도
+ │            ├─ 성공 → 세션 저장 → (필요 시) headless 전환
+ │            └─ 실패 → 브라우저 창 전환 + 계정 자동입력(prefill) 후 사용자 로그인 클릭 대기 (5분)
+ │                     └─ 로그인 성공 → 세션 저장 → (필요 시) headless 전환
  │
  ├─ (interactive 모드) 시작 메뉴
  │   ├─ 카드 등록/수정
@@ -147,7 +149,7 @@ ktxgo/
 | 파일 | 경로 | 설명 |
 |------|------|------|
 | 쿠키 | `~/.ktxgo/cookies.json` | 브라우저 세션 쿠키 |
-| 카드/계정 | OS keyring | `keyring` 라이브러리 사용 |
+| 카드/계정 | OS keyring | `keyring` 라이브러리 사용 (`KTX id/pass` 자동로그인 포함) |
 
 ## 기술적 세부사항
 
@@ -155,7 +157,7 @@ ktxgo/
 
 코레일은 DynaPath SDK를 사용하여 매크로/봇을 차단합니다:
 
-- **loginProcess**: 최엄격 보호 → 수동 로그인으로 우회
+- **loginProcess**: 최엄격 보호 → 저장 계정 자동입력, 실패 시 수동 로그인으로 우회
 - **ScheduleView**: `web_s` 레벨 보호 → Firefox fetch()로 우회
 - **TicketReservation**: `web_r` 레벨 보호 → Firefox fetch()로 우회
 - **ReservationPayment**: dpCnf 목록에 없음 → 직접 fetch() 호출 가능

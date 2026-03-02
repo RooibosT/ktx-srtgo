@@ -21,6 +21,7 @@ from .config import (
     DEFAULT_DEPARTURE,
     DEFAULT_VISIBLE_STATIONS,
     POLL_INTERVAL_S,
+    STORAGE_STATE_PATH,
     STATIONS,
 )
 from .korail import KorailAPI, KorailError, Train
@@ -239,17 +240,80 @@ def _cached_login_profile() -> dict[str, str] | None:
         return None
 
 
+def _mask_login_id(login_id: str) -> str:
+    value = login_id.strip()
+    if not value:
+        return "(없음)"
+    if len(value) <= 4:
+        return "*" * len(value)
+    return ("*" * (len(value) - 4)) + value[-4:]
+
+
+def _load_login_credentials() -> tuple[str, str] | None:
+    login_id = (keyring.get_password("KTX", "id") or "").strip()
+    login_pass = (keyring.get_password("KTX", "pass") or "").strip()
+    if not login_id or not login_pass:
+        return None
+    return login_id, login_pass
+
+
+def _set_login_credentials_interactive() -> bool:
+    defaults = {
+        "id": keyring.get_password("KTX", "id") or "",
+        "pass": keyring.get_password("KTX", "pass") or "",
+    }
+    login_info = _prompt_guarded(
+        [
+            inquirer.Text(
+                "id",
+                message="KTX 회원번호 (Enter: 완료, Ctrl-C: 취소)",
+                default=defaults["id"],
+            ),
+            inquirer.Password(
+                "pass",
+                message="KTX 비밀번호 (Enter: 완료, Ctrl-C: 취소)",
+                default=defaults["pass"],
+            ),
+        ]
+    )
+    if not login_info:
+        click.echo("자동로그인 계정 설정이 취소되었습니다.")
+        return False
+
+    login_id = str(login_info.get("id", "")).strip()
+    login_pass = str(login_info.get("pass", "")).strip()
+    if not login_id or not login_pass:
+        click.echo("입력 오류: 회원번호와 비밀번호를 모두 입력하세요.")
+        return False
+
+    keyring.set_password("KTX", "id", login_id)
+    keyring.set_password("KTX", "pass", login_pass)
+    click.echo(f"자동로그인 계정이 저장되었습니다. (회원번호: {_mask_login_id(login_id)})")
+    return True
+
+
 def _login_and_save_session(force_relogin: bool = False) -> bool:
     backup_cookie: str | None = None
-    if force_relogin and COOKIE_PATH.is_file():
-        try:
-            backup_cookie = COOKIE_PATH.read_text()
-        except OSError:
-            backup_cookie = None
-        try:
-            COOKIE_PATH.unlink()
-        except OSError:
-            pass
+    backup_storage_state: str | None = None
+    if force_relogin:
+        if COOKIE_PATH.is_file():
+            try:
+                backup_cookie = COOKIE_PATH.read_text()
+            except OSError:
+                backup_cookie = None
+            try:
+                COOKIE_PATH.unlink()
+            except OSError:
+                pass
+        if STORAGE_STATE_PATH.is_file():
+            try:
+                backup_storage_state = STORAGE_STATE_PATH.read_text()
+            except OSError:
+                backup_storage_state = None
+            try:
+                STORAGE_STATE_PATH.unlink()
+            except OSError:
+                pass
 
     manager = BrowserManager(headless=False)
     try:
@@ -258,9 +322,16 @@ def _login_and_save_session(force_relogin: bool = False) -> bool:
             click.echo(f"[{_now()}] 브라우저에서 로그인하세요. (5분 제한)")
             if not api.login_manual(timeout_s=300):
                 click.echo("로그인 시간이 초과되었습니다.")
-                if force_relogin and backup_cookie is not None:
+                if force_relogin and backup_cookie is not None and not COOKIE_PATH.is_file():
                     COOKIE_PATH.parent.mkdir(parents=True, exist_ok=True)
                     COOKIE_PATH.write_text(backup_cookie)
+                if (
+                    force_relogin
+                    and backup_storage_state is not None
+                    and not STORAGE_STATE_PATH.is_file()
+                ):
+                    STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    STORAGE_STATE_PATH.write_text(backup_storage_state)
                 return False
 
             manager.save_cookies()
@@ -280,24 +351,63 @@ def _login_and_save_session(force_relogin: bool = False) -> bool:
                 COOKIE_PATH.write_text(backup_cookie)
             except OSError:
                 pass
+        if (
+            force_relogin
+            and backup_storage_state is not None
+            and not STORAGE_STATE_PATH.is_file()
+        ):
+            try:
+                STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+                STORAGE_STATE_PATH.write_text(backup_storage_state)
+            except OSError:
+                pass
         click.echo(f"[{_now()}] 로그인 설정 실패: {exc}")
         return False
 
 
 def _configure_login_interactive() -> None:
     click.echo("\n로그인 설정")
+    creds = _load_login_credentials()
+    if creds is None:
+        click.echo("자동로그인 계정: 미설정")
+    else:
+        click.echo(f"자동로그인 계정: {_mask_login_id(creds[0])}")
 
     if not COOKIE_PATH.is_file():
         click.echo("저장된 로그인 세션이 없습니다.")
-        if click.confirm("지금 로그인 창을 열까요?", default=True):
+        choice = _list_input_guarded(
+            message="로그인 설정",
+            choices=[
+                ("자동로그인 계정 등록/수정", "credentials"),
+                ("지금 로그인 창 열기 (수동 로그인)", "login"),
+                ("취소", "cancel"),
+            ],
+        )
+        if choice == "credentials":
+            _set_login_credentials_interactive()
+        elif choice == "login":
             _login_and_save_session(force_relogin=False)
+        else:
+            click.echo("로그인 설정을 취소했습니다.")
         return
 
     profile = _cached_login_profile()
     if profile is None:
         click.echo("저장된 세션이 만료되었거나 유효하지 않습니다.")
-        if click.confirm("다시 로그인할까요?", default=True):
+        choice = _list_input_guarded(
+            message="로그인 정보 처리",
+            choices=[
+                ("로그인 정보 변경 (다시 로그인)", "change"),
+                ("자동로그인 계정 등록/수정", "credentials"),
+                ("취소", "cancel"),
+            ],
+        )
+        if choice == "change":
             _login_and_save_session(force_relogin=True)
+        elif choice == "credentials":
+            _set_login_credentials_interactive()
+        else:
+            click.echo("로그인 설정을 취소했습니다.")
         return
 
     click.echo(f"현재 로그인 정보: {_format_login_profile(profile)}")
@@ -306,11 +416,14 @@ def _configure_login_interactive() -> None:
         choices=[
             ("현재 로그인 정보 유지", "keep"),
             ("로그인 정보 변경 (다시 로그인)", "change"),
+            ("자동로그인 계정 등록/수정", "credentials"),
             ("취소", "cancel"),
         ],
     )
     if choice == "change":
         _login_and_save_session(force_relogin=True)
+    elif choice == "credentials":
+        _set_login_credentials_interactive()
     elif choice == "keep":
         click.echo("현재 로그인 정보를 유지합니다.")
     else:
@@ -782,15 +895,78 @@ def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> Ko
         click.echo(f"[{_now()}] Logged in via saved session.")
         return api
 
-    # Need manual login — must open visible browser
-    if headless:
-        click.echo(
-            f"[{_now()}] No saved session. Restarting browser for manual login..."
-        )
+    def _restart_browser(*, headed: bool) -> KorailAPI:
         manager.close()
-        manager._headless = False
+        manager._headless = not headed
         manager.start()
-        api = KorailAPI(manager.page)
+        return KorailAPI(manager.page)
+
+    def _reload_headless_after_login() -> KorailAPI:
+        if not headless:
+            return KorailAPI(manager.page)
+        api_local = _restart_browser(headed=False)
+        if not api_local.wait_for_login_stable(
+            timeout_s=3.0,
+            interval_s=0.35,
+            stable_checks=2,
+        ):
+            click.echo("Saved session not ready. Try --no-headless.")
+            sys.exit(1)
+        return api_local
+
+    creds = _load_login_credentials()
+    if creds is not None:
+        login_id, login_pass = creds
+        masked_id = _mask_login_id(login_id)
+        if manager._headless:
+            click.echo(
+                f"[{_now()}] Saved session is invalid. Trying auto-login ({masked_id})..."
+            )
+            if api.login_auto(login_id, login_pass, timeout_s=25):
+                manager.save_cookies()
+                click.echo(f"[{_now()}] Auto-login successful — session saved.")
+                return api
+
+            reason = api.last_auto_login_error or "unknown"
+            detail = (api.last_auto_login_detail or "").strip()
+            click.echo(
+                f"[{_now()}] Auto-login failed in current browser mode. reason={reason}"
+            )
+            if detail:
+                click.echo(f"[{_now()}] Auto-login detail: {detail}")
+
+            # Avoid repeated macro popups in visible mode.
+            click.echo(
+                f"[{_now()}] Switching to visible browser for assisted login..."
+            )
+            api = _restart_browser(headed=True)
+        else:
+            click.echo(
+                f"[{_now()}] Saved session is invalid. Preparing assisted login ({masked_id})..."
+            )
+
+        prefilled = api.prefill_login_form(login_id, login_pass)
+        if prefilled:
+            click.echo(
+                f"[{_now()}] 로그인 정보 자동입력 완료 ({masked_id}). "
+                "비밀번호 칸을 한 번 클릭한 뒤 로그인 버튼을 눌러주세요."
+            )
+            if not api.login_manual(timeout_s=300, open_login_page=False):
+                click.echo("Login timed out.")
+                sys.exit(1)
+            manager.save_cookies()
+            click.echo(f"[{_now()}] Login successful — session saved.")
+            if headless:
+                return _reload_headless_after_login()
+            return api
+        click.echo(f"[{_now()}] Assisted prefill failed. Falling back to manual login.")
+    else:
+        click.echo(f"[{_now()}] No saved auto-login credentials. Skipping auto-login.")
+
+    # Fallback to manual login — must open visible browser
+    if manager._headless:
+        click.echo(f"[{_now()}] Restarting browser for manual login...")
+        api = _restart_browser(headed=True)
 
     click.echo(f"[{_now()}] Please log in through the browser window (5 min timeout).")
     if not api.login_manual(timeout_s=300):
@@ -800,21 +976,8 @@ def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> Ko
     manager.save_cookies()
     click.echo(f"[{_now()}] Login successful — session saved.")
 
-    # If we restarted in headed mode but user wanted headless,
-    # re-launch headless now that we have cookies.
     if headless:
-        manager.close()
-        manager._headless = True
-        manager.start()
-        api = KorailAPI(manager.page)
-        if not api.wait_for_login_stable(
-            timeout_s=3.0,
-            interval_s=0.35,
-            stable_checks=2,
-        ):
-            click.echo("Saved session not ready. Try --no-headless.")
-            sys.exit(1)
-
+        return _reload_headless_after_login()
     return api
 
 

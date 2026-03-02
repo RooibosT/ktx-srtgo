@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import cast
 
-from playwright.sync_api import Page
+from playwright.sync_api import Frame, Locator, Page
 
 from .config import (
     API_LOGIN_CHECK,
@@ -120,6 +120,335 @@ class Train:
 class KorailAPI:
     def __init__(self, page: Page):
         self.page: Page = page
+        self.last_auto_login_error: str | None = None
+        self.last_auto_login_detail: str | None = None
+
+    @staticmethod
+    def _pick_visible_locator(
+        scope: Frame | Locator,
+        selectors: list[str],
+    ) -> Locator | None:
+        for selector in selectors:
+            try:
+                items = scope.locator(selector)
+                count = min(items.count(), 8)
+            except Exception:
+                continue
+            for idx in range(count):
+                try:
+                    candidate = items.nth(idx)
+                    if candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
+    def _click_member_mode(frame: Frame) -> bool:
+        selector_candidates = [
+            "input[type='radio'][value*='2']",
+            "input[type='radio'][id*='member' i]",
+            "input[type='radio'][name*='member' i]",
+            "input[type='radio'][id*='mb' i]",
+            "input[type='radio'][name*='mb' i]",
+        ]
+        radio = KorailAPI._pick_visible_locator(frame, selector_candidates)
+        if radio is not None:
+            try:
+                radio.click(timeout=800)
+                return True
+            except Exception:
+                pass
+
+        text_candidates = [
+            "label:has-text('회원번호')",
+            "button:has-text('회원번호')",
+            "a:has-text('회원번호')",
+            "[role='tab']:has-text('회원번호')",
+            "span:has-text('회원번호')",
+        ]
+        text_target = KorailAPI._pick_visible_locator(frame, text_candidates)
+        if text_target is not None:
+            try:
+                text_target.click(timeout=800)
+                return True
+            except Exception:
+                return False
+        return False
+
+    @staticmethod
+    def _pick_submit_near_password(frame: Frame, pw_input: Locator) -> Locator | None:
+        """Pick the login submit control nearest to the password input."""
+        try:
+            pw_box = pw_input.bounding_box()
+        except Exception:
+            return None
+        if not pw_box:
+            return None
+
+        pw_center_x = pw_box["x"] + (pw_box["width"] / 2.0)
+        pw_center_y = pw_box["y"] + (pw_box["height"] / 2.0)
+
+        candidate_selectors = [
+            "button[name='btnLogin']",
+            "input[name='btnLogin']",
+            "button[id='btnLogin']",
+            "input[id='btnLogin']",
+            "button[name*='btnLogin' i]",
+            "input[name*='btnLogin' i]",
+            "button[id*='btnLogin' i]",
+            "input[id*='btnLogin' i]",
+            "button:has-text('로그인')",
+            "a:has-text('로그인')",
+            "[role='button']:has-text('로그인')",
+            "button[type='submit']",
+            "input[type='submit']",
+            "button[id*='login' i]",
+            "a[id*='login' i]",
+            "button[name*='login' i]",
+            "a[name*='login' i]",
+            "[role='button'][id*='login' i]",
+            "[role='button'][name*='login' i]",
+        ]
+
+        best_below: tuple[float, Locator] | None = None
+        best_any: tuple[float, Locator] | None = None
+
+        for selector in candidate_selectors:
+            try:
+                items = frame.locator(selector)
+                count = min(items.count(), 20)
+            except Exception:
+                continue
+            for idx in range(count):
+                try:
+                    candidate = items.nth(idx)
+                    if not candidate.is_visible():
+                        continue
+                    box = candidate.bounding_box()
+                except Exception:
+                    continue
+                if not box:
+                    continue
+
+                center_x = box["x"] + (box["width"] / 2.0)
+                center_y = box["y"] + (box["height"] / 2.0)
+                dx = abs(center_x - pw_center_x)
+                dy = center_y - pw_center_y
+
+                # Prefer controls at or below password input.
+                score = abs(dy) + (0.4 * dx)
+                if dy >= -6:
+                    if best_below is None or score < best_below[0]:
+                        best_below = (score, candidate)
+                    continue
+
+                fallback_score = score + 1200.0
+                if best_any is None or fallback_score < best_any[0]:
+                    best_any = (fallback_score, candidate)
+
+        if best_below is not None:
+            return best_below[1]
+        if best_any is not None:
+            return best_any[1]
+        return None
+
+    @staticmethod
+    def _click_submit_via_dom_near_password(pw_input: Locator) -> str | None:
+        """DOM-level submit click near password input for pages with tricky handlers."""
+        try:
+            clicked = cast(
+                str,
+                pw_input.evaluate(
+                    """(pw) => {
+                    const isVisible = (el) => {
+                        if (!(el instanceof HTMLElement)) return false;
+                        const style = window.getComputedStyle(el);
+                        if (style.display === "none" || style.visibility === "hidden") return false;
+                        if (el.hasAttribute("disabled")) return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    };
+                    const isLoginLike = (el) => {
+                        const id = (el.id || "").toLowerCase();
+                        const name = (el.getAttribute("name") || "").toLowerCase();
+                        const cls = (el.className || "").toString().toLowerCase();
+                        const val = (el.getAttribute("value") || "").toLowerCase();
+                        const txt = (el.textContent || "").replace(/\\s+/g, "");
+                        return (
+                            id.includes("login")
+                            || id.includes("btnlogin")
+                            || name.includes("login")
+                            || name.includes("btnlogin")
+                            || cls.includes("login")
+                            || val.includes("로그인")
+                            || txt.includes("로그인")
+                        );
+                    };
+                    const collect = (root) => {
+                        const selectors = [
+                            "button[name='btnLogin']",
+                            "input[name='btnLogin']",
+                            "button[id='btnLogin']",
+                            "input[id='btnLogin']",
+                            "button[name*='btnLogin' i]",
+                            "input[name*='btnLogin' i]",
+                            "button[id*='btnLogin' i]",
+                            "input[id*='btnLogin' i]",
+                            "button[type='submit']",
+                            "input[type='submit']",
+                            "button",
+                            "a",
+                            "input[type='button']",
+                            "[role='button']",
+                        ];
+                        const out = [];
+                        for (const s of selectors) {
+                            for (const el of root.querySelectorAll(s)) {
+                                if (!isVisible(el)) continue;
+                                if (!isLoginLike(el)) continue;
+                                out.push(el);
+                            }
+                        }
+                        return out;
+                    };
+
+                    const pwRect = pw.getBoundingClientRect();
+                    const cx = pwRect.left + pwRect.width / 2;
+                    const cy = pwRect.top + pwRect.height / 2;
+
+                    const form = pw.closest("form");
+                    const candidates = [];
+                    const seen = new Set();
+                    for (const root of [form, document]) {
+                        if (!root) continue;
+                        for (const el of collect(root)) {
+                            if (seen.has(el)) continue;
+                            seen.add(el);
+                            const r = el.getBoundingClientRect();
+                            const ex = r.left + r.width / 2;
+                            const ey = r.top + r.height / 2;
+                            const dx = Math.abs(ex - cx);
+                            const dy = ey - cy;
+                            let score = Math.abs(dy) + (0.4 * dx);
+                            if (dy < -6) score += 1200;
+                            candidates.push({ el, score });
+                        }
+                        if (candidates.length) break;
+                    }
+                    if (!candidates.length) return "";
+                    candidates.sort((a, b) => a.score - b.score);
+                    const target = candidates[0].el;
+                    if (!(target instanceof HTMLElement)) return "";
+                    target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+                    target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+                    target.click();
+                    const label = (target.textContent || "").replace(/\\s+/g, " ").trim().slice(0, 50);
+                    const id = target.id || "";
+                    const name = target.getAttribute("name") || "";
+                    return `dom-click target=${target.tagName.toLowerCase()}#${id}[name=${name}] text=${label}`;
+                }"""
+                ),
+            )
+        except Exception:
+            return None
+        return clicked or None
+
+    @staticmethod
+    def _invoke_login_function(frame: Frame) -> str | None:
+        try:
+            invoked = cast(
+                str,
+                frame.evaluate(
+                    """() => {
+                    const fnNames = [
+                        "fn_login",
+                        "fnLogin",
+                        "goLogin",
+                        "loginProc",
+                        "loginProcess",
+                        "doLogin",
+                    ];
+                    for (const name of fnNames) {
+                        const fn = window[name];
+                        if (typeof fn === "function") {
+                            try {
+                                fn();
+                                return name;
+                            } catch (_) {
+                                // try next
+                            }
+                        }
+                    }
+                    return "";
+                }"""
+                ),
+            )
+        except Exception:
+            return None
+        return invoked or None
+
+    def _wait_login_after_submit(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + max(1.0, timeout_s)
+        while time.monotonic() < deadline:
+            if self.wait_for_login_stable(
+                timeout_s=0.8,
+                interval_s=0.3,
+                stable_checks=2,
+            ):
+                _ = self.page.goto(SEARCH_URL, wait_until="networkidle")
+                self.last_auto_login_error = None
+                self.last_auto_login_detail = None
+                return True
+            time.sleep(0.6)
+        return False
+
+    def prefill_login_form(self, member_id: str, password: str) -> bool:
+        """Open login page and prefill credentials without submitting."""
+        member_id = member_id.strip()
+        if not member_id or not password:
+            return False
+
+        _ = self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=5_000)
+        except Exception:
+            pass
+
+        member_mode = self.page.locator("button#memberNo")
+        id_input = self.page.locator("input#id")
+        pw_input = self.page.locator("input#password")
+        login_btn = self.page.locator(
+            "section.loginWrap div.mem_wrap div.btnWrap > button.btn_bn-depblue"
+        )
+        if (
+            member_mode.count() == 0
+            or id_input.count() == 0
+            or pw_input.count() == 0
+            or login_btn.count() == 0
+        ):
+            return False
+
+        try:
+            member_mode.first.click(timeout=2_000)
+        except Exception:
+            pass
+
+        try:
+            id_input.first.click(timeout=2_000)
+            id_input.first.fill("", timeout=2_000)
+            id_input.first.type(member_id, delay=70, timeout=4_000)
+
+            pw_input.first.click(timeout=2_000)
+            pw_input.first.fill("", timeout=2_000)
+            pw_input.first.type(password, delay=90, timeout=5_000)
+            # Korail login page is sensitive right after password typing.
+            # Re-focus password input once more to stabilize the submit state.
+            pw_input.first.click(timeout=2_000)
+            self.page.wait_for_timeout(700)
+        except Exception:
+            return False
+        return True
 
     def _api_call(self, endpoint: str, params: dict[str, str]) -> dict[str, object]:
         payload = cast(
@@ -170,24 +499,369 @@ class KorailAPI:
 
         return data
 
-    def login_manual(self, timeout_s: int = 300) -> bool:
+    def login_manual(self, timeout_s: int = 300, *, open_login_page: bool = True) -> bool:
         """Navigate to login page and wait for user to log in manually.
 
         DynaPath blocks programmatic login API calls, so the user must
         log in through the real web form.  After login, cookies are saved
         by the caller (BrowserManager.save_cookies) for future reuse.
         """
-        _ = self.page.goto(LOGIN_URL, wait_until="networkidle")
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            if self.wait_for_login_stable(
-                timeout_s=0.6,
-                interval_s=0.3,
-                stable_checks=2,
-            ):
-                _ = self.page.goto(SEARCH_URL, wait_until="networkidle")
-                return True
-            time.sleep(1.0)
+        comm_error_seen = False
+
+        def _on_dialog(dialog: object) -> None:
+            nonlocal comm_error_seen
+            msg = ""
+            try:
+                msg = str(getattr(dialog, "message", lambda: "")()).strip()
+            except Exception:
+                msg = ""
+            if "통신 중 에러" in msg:
+                comm_error_seen = True
+            try:
+                _ = getattr(dialog, "accept")()
+            except Exception:
+                pass
+
+        self.page.on("dialog", _on_dialog)
+        try:
+            if open_login_page:
+                _ = self.page.goto(LOGIN_URL, wait_until="networkidle")
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                if comm_error_seen:
+                    comm_error_seen = False
+                    try:
+                        pw_input = self.page.locator("input#password")
+                        if pw_input.count() > 0:
+                            pw_input.first.click(timeout=1_500)
+                            self.page.wait_for_timeout(350)
+                    except Exception:
+                        pass
+
+                if self.wait_for_login_stable(
+                    timeout_s=0.6,
+                    interval_s=0.3,
+                    stable_checks=2,
+                ):
+                    _ = self.page.goto(SEARCH_URL, wait_until="networkidle")
+                    return True
+                time.sleep(1.0)
+            return False
+        finally:
+            self.page.remove_listener("dialog", _on_dialog)
+
+    def login_auto(self, member_id: str, password: str, timeout_s: int = 30) -> bool:
+        """Try automatic login through the real Korail web form."""
+        self.last_auto_login_error = None
+        self.last_auto_login_detail = None
+        dialog_messages: list[str] = []
+        macro_error_msg: str | None = None
+
+        def _on_dialog(dialog: object) -> None:
+            try:
+                msg = str(getattr(dialog, "message", lambda: "")()).strip()
+            except Exception:
+                msg = ""
+            if msg:
+                dialog_messages.append(msg)
+            try:
+                _ = getattr(dialog, "accept")()
+            except Exception:
+                pass
+
+        def _on_response(response: object) -> None:
+            nonlocal macro_error_msg
+            if macro_error_msg:
+                return
+            try:
+                url = str(getattr(response, "url"))
+            except Exception:
+                return
+            if "/dynaPath/" not in url:
+                return
+            try:
+                text = str(getattr(response, "text")())
+            except Exception:
+                return
+            if "MACRO ERROR" in text:
+                macro_error_msg = (
+                    "dynaPath blocked automated submit with MACRO ERROR."
+                )
+
+        self.page.on("dialog", _on_dialog)
+        self.page.on("response", _on_response)
+        member_id = member_id.strip()
+        if not member_id or not password:
+            self.last_auto_login_error = "missing_credentials"
+            self.last_auto_login_detail = "KTX id/pass is empty."
+            self.page.remove_listener("dialog", _on_dialog)
+            self.page.remove_listener("response", _on_response)
+            return False
+
+        _ = self.page.goto(LOGIN_URL, wait_until="domcontentloaded")
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=5_000)
+        except Exception:
+            pass
+
+        id_selectors = [
+            "input[name='txtMemberNo']",
+            "input[id='txtMemberNo']",
+            "input[name*='txtMemberNo' i]",
+            "input[id*='txtMemberNo' i]",
+            "input[name='txtId']",
+            "input[id='txtId']",
+            "input[name*='member' i]",
+            "input[id*='member' i]",
+            "input[name*='mb' i]",
+            "input[id*='mb' i]",
+            "input[name*='id' i]",
+            "input[id*='id' i]",
+            "input[type='text']",
+            "input[type='tel']",
+        ]
+        pw_selectors = [
+            "input[name='txtPwd']",
+            "input[id='txtPwd']",
+            "input[name*='txtPwd' i]",
+            "input[id*='txtPwd' i]",
+            "input[type='password']",
+            "input[name*='pwd' i]",
+            "input[id*='pwd' i]",
+            "input[name*='pass' i]",
+            "input[id*='pass' i]",
+        ]
+        submit_selectors = [
+            "button[name='btnLogin']",
+            "input[name='btnLogin']",
+            "button[id='btnLogin']",
+            "input[id='btnLogin']",
+            "button[name*='btnLogin' i]",
+            "input[name*='btnLogin' i]",
+            "button[id*='btnLogin' i]",
+            "input[id*='btnLogin' i]",
+            "button[type='submit']",
+            "input[type='submit']",
+            "button[id*='login' i]",
+            "a[id*='login' i]",
+            "button[name*='login' i]",
+            "a[name*='login' i]",
+            "[role='button'][id*='login' i]",
+            "[role='button'][name*='login' i]",
+            "button:has-text('로그인')",
+            "a:has-text('로그인')",
+            "[role='button']:has-text('로그인')",
+        ]
+
+        for frame in self.page.frames:
+            try:
+                _ = self._click_member_mode(frame)
+            except Exception:
+                pass
+
+            id_input = self._pick_visible_locator(frame, id_selectors)
+            pw_input = self._pick_visible_locator(frame, pw_selectors)
+            if id_input is None or pw_input is None:
+                continue
+
+            form_scope: Locator | None = None
+            try:
+                possible_form = pw_input.locator("xpath=ancestor::form[1]").first
+                if possible_form.count() > 0:
+                    form_scope = possible_form
+            except Exception:
+                form_scope = None
+
+            if form_scope is not None:
+                scoped_id = self._pick_visible_locator(form_scope, id_selectors)
+                if scoped_id is not None:
+                    id_input = scoped_id
+                scoped_submit = self._pick_visible_locator(form_scope, submit_selectors)
+            else:
+                scoped_submit = None
+
+            id_values = [member_id]
+            digits_only = "".join(ch for ch in member_id if ch.isdigit())
+            if digits_only and digits_only != member_id:
+                id_values.append(digits_only)
+
+            for id_value in id_values:
+                try:
+                    id_input.click(timeout=1_500)
+                    id_input.fill("", timeout=1_500)
+                    id_input.type(id_value, delay=45, timeout=3_500)
+
+                    pw_input.click(timeout=1_500)
+                    pw_input.fill("", timeout=1_500)
+                    pw_input.type(password, delay=55, timeout=4_500)
+                    # Korail login can fail when submit is triggered immediately
+                    # after password typing. Re-focus and wait briefly first.
+                    pw_input.click(timeout=1_500)
+                    time.sleep(0.55)
+                except Exception:
+                    self.last_auto_login_error = "fill_failed"
+                    self.last_auto_login_detail = (
+                        "Failed while typing into id/password input fields."
+                    )
+                    continue
+
+                submit_wait_s = min(7.0, float(timeout_s))
+                submit_attempted = False
+                near_submit = self._pick_submit_near_password(frame, pw_input)
+                if near_submit is not None:
+                    try:
+                        near_submit.click(timeout=1_800)
+                        submit_attempted = True
+                        self.last_auto_login_detail = "submit_method=playwright_near_click"
+                    except Exception:
+                        pass
+                    else:
+                        if self._wait_login_after_submit(submit_wait_s):
+                            self.page.remove_listener("dialog", _on_dialog)
+                            self.page.remove_listener("response", _on_response)
+                            return True
+
+                    try:
+                        near_submit.click(timeout=1_800, force=True)
+                        submit_attempted = True
+                        self.last_auto_login_detail = (
+                            "submit_method=playwright_near_click_force"
+                        )
+                    except Exception:
+                        pass
+                    else:
+                        if self._wait_login_after_submit(submit_wait_s):
+                            self.page.remove_listener("dialog", _on_dialog)
+                            self.page.remove_listener("response", _on_response)
+                            return True
+
+                submit_btn = scoped_submit or self._pick_visible_locator(frame, submit_selectors)
+                if submit_btn is not None:
+                    try:
+                        submit_btn.click(timeout=1_800)
+                        submit_attempted = True
+                        self.last_auto_login_detail = "submit_method=playwright_submit_click"
+                    except Exception:
+                        pass
+                    else:
+                        if self._wait_login_after_submit(submit_wait_s):
+                            self.page.remove_listener("dialog", _on_dialog)
+                            self.page.remove_listener("response", _on_response)
+                            return True
+
+                    try:
+                        submit_btn.click(timeout=1_800, force=True)
+                        submit_attempted = True
+                        self.last_auto_login_detail = (
+                            "submit_method=playwright_submit_click_force"
+                        )
+                    except Exception:
+                        pass
+                    else:
+                        if self._wait_login_after_submit(submit_wait_s):
+                            self.page.remove_listener("dialog", _on_dialog)
+                            self.page.remove_listener("response", _on_response)
+                            return True
+
+                try:
+                    pw_input.press("Enter", timeout=1_800)
+                    submit_attempted = True
+                    self.last_auto_login_detail = "submit_method=password_enter"
+                except Exception:
+                    pass
+                else:
+                    if self._wait_login_after_submit(submit_wait_s):
+                        self.page.remove_listener("dialog", _on_dialog)
+                        self.page.remove_listener("response", _on_response)
+                        return True
+
+                dom_submit = self._click_submit_via_dom_near_password(pw_input)
+                if dom_submit:
+                    submit_attempted = True
+                    self.last_auto_login_detail = dom_submit
+                    if self._wait_login_after_submit(submit_wait_s):
+                        self.page.remove_listener("dialog", _on_dialog)
+                        self.page.remove_listener("response", _on_response)
+                        return True
+
+                if form_scope is not None:
+                    try:
+                        _ = form_scope.evaluate(
+                            """(form) => {
+                            if (form && typeof form.requestSubmit === "function") {
+                                form.requestSubmit();
+                                return true;
+                            }
+                            if (form && typeof form.submit === "function") {
+                                form.submit();
+                                return true;
+                            }
+                            return false;
+                        }"""
+                        )
+                        submit_attempted = True
+                        self.last_auto_login_detail = "submit_method=form_request_submit"
+                    except Exception:
+                        pass
+                    else:
+                        if self._wait_login_after_submit(submit_wait_s):
+                            self.page.remove_listener("dialog", _on_dialog)
+                            self.page.remove_listener("response", _on_response)
+                            return True
+
+                invoked = self._invoke_login_function(frame)
+                if invoked:
+                    submit_attempted = True
+                    self.last_auto_login_detail = f"Invoked login function: {invoked}"
+                    if self._wait_login_after_submit(submit_wait_s):
+                        self.page.remove_listener("dialog", _on_dialog)
+                        self.page.remove_listener("response", _on_response)
+                        return True
+
+                if not submit_attempted:
+                    self.last_auto_login_error = "submit_failed"
+                    if not self.last_auto_login_detail:
+                        self.last_auto_login_detail = (
+                            "Login submit control not found/clickable and Enter submit failed."
+                        )
+                    continue
+
+                self.last_auto_login_error = "login_check_failed"
+                login_msg = ""
+                try:
+                    data = self._api_call(API_LOGIN_CHECK, {})
+                    login_msg = str(data.get("h_msg_txt", "")).strip()
+                except KorailError as exc:
+                    login_msg = str(exc).strip()
+                if login_msg:
+                    detail_prefix = self.last_auto_login_detail or ""
+                    if detail_prefix:
+                        self.last_auto_login_detail = (
+                            f"{detail_prefix} / loginCheck message: {login_msg}"
+                        )
+                    else:
+                        self.last_auto_login_detail = f"loginCheck message: {login_msg}"
+                else:
+                    if not self.last_auto_login_detail:
+                        self.last_auto_login_detail = (
+                            "Form submitted but login state was not confirmed."
+                        )
+                if dialog_messages:
+                    self.last_auto_login_detail = (
+                        f"{self.last_auto_login_detail} / dialog: {dialog_messages[-1]}"
+                    )
+                if macro_error_msg:
+                    self.last_auto_login_error = "macro_blocked"
+                    self.last_auto_login_detail = (
+                        f"{self.last_auto_login_detail} / {macro_error_msg}"
+                    )
+        if self.last_auto_login_error is None:
+            self.last_auto_login_error = "login_form_not_found"
+            self.last_auto_login_detail = (
+                "Could not find visible id/password inputs in any frame."
+            )
+        self.page.remove_listener("dialog", _on_dialog)
+        self.page.remove_listener("response", _on_response)
         return False
 
     def wait_for_login_stable(
