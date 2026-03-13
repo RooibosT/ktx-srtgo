@@ -52,10 +52,24 @@ keyring set telegram token      # 봇 토큰
 keyring set telegram chat_id    # 채팅 ID
 ```
 
+### 예약대기 좌석배정 SMS 알림 (선택)
+
+```bash
+# interactive 메뉴 등록/수정
+python3 -m ktxgo
+
+# 직접 keyring 등록
+keyring set KTX waitlist_alert_phone   # 좌석배정 SMS를 받을 전화번호
+```
+
+interactive 메뉴의 `예약대기 SMS 알림 번호 등록/수정`에서도 같은 값을 저장할 수 있습니다.
+
+현재 확인된 코레일톡 요청 계약은 `SMS` 알림만 노출합니다. 카카오톡 채널은 아직 확인되지 않았습니다.
+
 ## 사용법
 
 ```bash
-# 기본 실행 (메뉴: 예매 시작 / 카드 등록·수정 / 나가기)
+# 기본 실행 (메뉴: 예매 시작 / 로그인 설정 / 역 설정 / 예약대기 SMS 알림 번호 등록·수정 / 카드 등록·수정 / 나가기)
 python3 -m ktxgo
 
 # 옵션 지정 후 대화형 실행
@@ -67,6 +81,7 @@ python3 -m ktxgo \
   --train-type itx-saemaeul \
   --train-type mugunghwa \
   --seat general \
+  --waitlist-alert-phone 01012341234 \
   --auto-pay \
   --telegram
 
@@ -104,6 +119,7 @@ python3 -m ktxgo \
 | `--auto-pay` | off | 예약 성공 후 자동 카드결제 |
 | `--smart-ticket` / `--no-smart-ticket` | smart-ticket | 자동결제 시 스마트티켓 발권 여부 |
 | `--telegram` | off | 예약/결제 결과 텔레그램 알림 |
+| `--waitlist-alert-phone` | off | 예약대기 성공 시 좌석배정 SMS 알림을 등록할 전화번호. 미지정 시 `keyring`의 `KTX waitlist_alert_phone` 사용 |
 
 ### 지원 역 목록
 
@@ -121,6 +137,9 @@ python3 -m ktxgo \
  │                     └─ 로그인 성공 → 세션 저장 → (필요 시) headless 전환
  │
  ├─ (interactive 모드) 시작 메뉴
+ │   ├─ 로그인 설정
+ │   ├─ 역 설정
+ │   ├─ 예약대기 SMS 알림 번호 등록/수정
  │   ├─ 카드 등록/수정
  │   └─ 예매 시작
  │      ├─ 출발/도착/날짜/시간/조회 열차 범위(`KTX만` / `KTX + ITX/무궁화 등`) 입력
@@ -133,6 +152,7 @@ python3 -m ktxgo \
  │   │   ├─ 좌석 있으면 TicketReservation API(`txtJobId=1101`)로 예매
  │   │   └─ 좌석 매진 + 예약대기 가능이면 TicketReservation API(`txtJobId=1102`)로 예약대기 신청
  │   │       ├─ 성공
+ │   │       │   ├─ `ReservationWait` API로 좌석배정 SMS 알림 전화번호 등록
  │   │       │   ├─ 좌석 예매 + --auto-pay → ReservationPayment API로 결제
  │   │       │   ├─ --telegram → 텔레그램 알림 전송
  │   │       │   └─ 종료
@@ -159,7 +179,7 @@ ktxgo/
 | 파일 | 경로 | 설명 |
 |------|------|------|
 | 쿠키 | `~/.ktxgo/cookies.json` | 브라우저 세션 쿠키 |
-| 카드/계정 | OS keyring | `keyring` 라이브러리 사용 (`KTX id/pass` 자동로그인 포함) |
+| 카드/계정/알림전화 | OS keyring | `keyring` 라이브러리 사용 (`KTX id/pass`, 카드 정보, `KTX waitlist_alert_phone`) |
 
 ## 기술적 세부사항
 
@@ -170,6 +190,7 @@ ktxgo/
 - **loginProcess**: 최엄격 보호 → 저장 계정 자동입력, 실패 시 수동 로그인으로 우회
 - **ScheduleView**: `web_s` 레벨 보호 → Firefox fetch()로 우회
 - **TicketReservation**: `web_r` 레벨 보호 → Firefox fetch()로 우회
+- **ReservationWait**: 예약대기 후 좌석배정 SMS 알림 전화번호 등록
 - **ReservationPayment**: dpCnf 목록에 없음 → 직접 fetch() 호출 가능
 
 ### Chrome vs Firefox

@@ -271,6 +271,7 @@ def _prompt_main_menu() -> str:
             ("예매 정보 확인", "reservation"),
             ("로그인 설정", "login"),
             ("역 설정", "station"),
+            ("예약대기 SMS 알림 번호 등록/수정", "waitlist-alert"),
             ("카드 등록/수정", "card"),
             ("나가기", "exit"),
         ],
@@ -542,6 +543,34 @@ def _set_visible_stations_interactive() -> bool:
     selected_stations = ",".join(ordered_selected)
     keyring.set_password("KTX", "station", selected_stations)
     click.echo(f"선택된 역: {selected_stations}")
+    return True
+
+
+def _set_waitlist_alert_phone_interactive() -> bool:
+    defaults = {
+        "phone": keyring.get_password("KTX", "waitlist_alert_phone") or "",
+    }
+    waitlist_info = _prompt_guarded(
+        [
+            inquirer.Text(
+                "phone",
+                message="예약대기 좌석배정 SMS 알림 번호 (Enter: 완료, Ctrl-C: 취소)",
+                default=defaults["phone"],
+            )
+        ]
+    )
+    if not waitlist_info:
+        click.echo("예약대기 SMS 알림 번호 설정이 취소되었습니다.")
+        return False
+
+    raw_phone = str(waitlist_info.get("phone", "")).strip()
+    digits_only = "".join(ch for ch in raw_phone if ch.isdigit())
+    if not digits_only:
+        click.echo("입력 오류: 전화번호를 숫자로 입력하세요.")
+        return False
+
+    keyring.set_password("KTX", "waitlist_alert_phone", digits_only)
+    click.echo(f"예약대기 SMS 알림 번호가 저장되었습니다. ({digits_only})")
     return True
 
 
@@ -1236,6 +1265,7 @@ def _send_telegram(
     paid: bool,
     *,
     waitlist: bool = False,
+    waitlist_alert_status: str | None = None,
 ) -> None:
     """Send reservation/payment notification via Telegram."""
     token = keyring.get_password("telegram", "token")
@@ -1267,6 +1297,8 @@ def _send_telegram(
         f"{formatted_date} {formatted_time}\n"
         f"PNR: {pnr}"
     )
+    if waitlist and waitlist_alert_status:
+        text += f"\n좌석배정 알림: {waitlist_alert_status}"
 
     try:
         import telegram
@@ -1280,6 +1312,14 @@ def _send_telegram(
         click.echo(f"[{_now()}] Telegram notification sent.")
     except Exception as exc:
         click.echo(f"[{_now()}] Telegram failed: {exc}")
+
+
+def _resolve_waitlist_alert_phone(phone: str | None) -> str | None:
+    resolved = (
+        phone or keyring.get_password("KTX", "waitlist_alert_phone") or ""
+    ).strip()
+    digits_only = "".join(ch for ch in resolved if ch.isdigit())
+    return digits_only or None
 
 
 @click.command()
@@ -1335,6 +1375,11 @@ def _send_telegram(
 @click.option(
     "--telegram", is_flag=True, default=False, help="Send Telegram notification"
 )
+@click.option(
+    "--waitlist-alert-phone",
+    default=None,
+    help="Phone number used for Korail waitlist seat-assignment SMS alerts",
+)
 def main(
     departure: str,
     arrival: str,
@@ -1350,6 +1395,7 @@ def main(
     auto_pay: bool,
     smart_ticket: bool,
     telegram: bool,
+    waitlist_alert_phone: str | None,
 ) -> None:
     configure_keyring_backend()
 
@@ -1392,6 +1438,9 @@ def main(
             if action == "station":
                 _set_visible_stations_interactive()
                 visible_stations = _load_visible_stations()
+                continue
+            if action == "waitlist-alert":
+                _set_waitlist_alert_phone_interactive()
                 continue
             if action == "card":
                 _set_card_interactive()
@@ -1557,6 +1606,30 @@ def main(
                     if key in result:
                         click.echo(f"  {key}: {result[key]}")
 
+                waitlist_alert_status: str | None = None
+                if waitlist:
+                    resolved_waitlist_alert_phone = _resolve_waitlist_alert_phone(
+                        waitlist_alert_phone
+                    )
+                    if resolved_waitlist_alert_phone is None:
+                        waitlist_alert_status = "미등록"
+                        click.echo(
+                            f"[{_now()}] 예약대기 알림 전화번호가 없어 좌석배정 알림 신청을 건너뜁니다."
+                        )
+                    else:
+                        try:
+                            api.set_waitlist_alert(
+                                str(result.get("h_pnr_no", "")),
+                                resolved_waitlist_alert_phone,
+                            )
+                            waitlist_alert_status = "등록완료"
+                            click.echo(
+                                f"[{_now()}] 좌석배정 알림 등록완료 ({resolved_waitlist_alert_phone})"
+                            )
+                        except KorailError as exc:
+                            waitlist_alert_status = f"등록실패: {exc}"
+                            click.echo(f"[{_now()}] 좌석배정 알림 등록 실패: {exc}")
+
                 # Auto-pay
                 paid = False
                 if auto_pay and not waitlist:
@@ -1566,7 +1639,13 @@ def main(
 
                 # Telegram notification
                 if telegram:
-                    _send_telegram(train, result, paid, waitlist=waitlist)
+                    _send_telegram(
+                        train,
+                        result,
+                        paid,
+                        waitlist=waitlist,
+                        waitlist_alert_status=waitlist_alert_status,
+                    )
 
                 return
 

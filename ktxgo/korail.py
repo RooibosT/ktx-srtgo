@@ -15,6 +15,7 @@ from .config import (
     API_RESERVATION_VIEW,
     API_RESERVE,
     API_SCHEDULE,
+    API_WAITLIST_ALERT,
     LOGIN_URL,
     MOBILE_DEVICE,
     MOBILE_KEY,
@@ -1148,6 +1149,26 @@ class KorailAPI:
             "txtCardPw_1": "",
         }
         return self._api_call(API_RESERVE, params)
+
+    def set_waitlist_alert(
+        self,
+        pnr_no: str,
+        phone: str,
+        *,
+        allow_seat_change: bool = False,
+    ) -> dict[str, object]:
+        return self._api_call(
+            API_WAITLIST_ALERT,
+            {
+                "Device": MOBILE_DEVICE,
+                "Version": MOBILE_VERSION,
+                "Key": MOBILE_KEY,
+                "txtPnrNo": pnr_no,
+                "txtPsrmClChgFlg": "Y" if allow_seat_change else "N",
+                "txtSmsSndFlg": "Y",
+                "txtCpNo": phone,
+            },
+        )
 
     def is_logged_in(self) -> bool:
         try:
