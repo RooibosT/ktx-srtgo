@@ -1,6 +1,7 @@
 """Configuration constants for KTXgo."""
 
 from pathlib import Path
+from typing import Sequence
 
 # Korail Web Base
 BASE_URL = "https://www.korail.com"
@@ -45,6 +46,86 @@ RSV_WAITING = "09"
 # Train groups
 TRAIN_GROUP_KTX = "100"
 TRAIN_GROUP_ALL = "00"
+TRAIN_TYPE_KTX = "ktx"
+TRAIN_TYPE_ITX_SAEMAEUL = "itx-saemaeul"
+TRAIN_TYPE_MUGUNGHWA = "mugunghwa"
+TRAIN_TYPE_TONGGUEN = "tonggeun"
+TRAIN_TYPE_ITX_CHEONGCHUN = "itx-cheongchun"
+TRAIN_TYPE_ITX_MAEUM = "itx-maeum"
+TRAIN_TYPE_AIRPORT = "airport"
+TRAIN_TYPE_LEGACY_ALL = "legacy-all"
+TRAIN_TYPE_SAEMAEUL_ALIAS = "saemaeul"
+TRAIN_TYPE_NURIRO_ALIAS = "nuriro"
+TRAIN_TYPE_ORDER = (
+    TRAIN_TYPE_KTX,
+    TRAIN_TYPE_ITX_SAEMAEUL,
+    TRAIN_TYPE_MUGUNGHWA,
+    TRAIN_TYPE_TONGGUEN,
+    TRAIN_TYPE_ITX_CHEONGCHUN,
+    TRAIN_TYPE_ITX_MAEUM,
+    TRAIN_TYPE_AIRPORT,
+)
+DEFAULT_TRAIN_TYPES = (TRAIN_TYPE_KTX,)
+TRAIN_TYPE_CODE_BY_NAME = {
+    TRAIN_TYPE_KTX: "100",
+    TRAIN_TYPE_ITX_SAEMAEUL: "101",
+    TRAIN_TYPE_MUGUNGHWA: "102",
+    TRAIN_TYPE_TONGGUEN: "103",
+    TRAIN_TYPE_ITX_CHEONGCHUN: "104",
+    TRAIN_TYPE_ITX_MAEUM: "101",
+    TRAIN_TYPE_AIRPORT: "105",
+}
+TRAIN_TYPE_LABEL_BY_NAME = {
+    TRAIN_TYPE_KTX: "KTX",
+    TRAIN_TYPE_ITX_SAEMAEUL: "ITX-새마을",
+    TRAIN_TYPE_MUGUNGHWA: "무궁화/누리로",
+    TRAIN_TYPE_TONGGUEN: "통근",
+    TRAIN_TYPE_ITX_CHEONGCHUN: "ITX-청춘",
+    TRAIN_TYPE_ITX_MAEUM: "ITX-마음",
+    TRAIN_TYPE_AIRPORT: "공항",
+}
+TRAIN_TYPE_ALIAS_TO_NAME = {
+    TRAIN_TYPE_SAEMAEUL_ALIAS: TRAIN_TYPE_ITX_SAEMAEUL,
+    TRAIN_TYPE_NURIRO_ALIAS: TRAIN_TYPE_MUGUNGHWA,
+}
+TRAIN_TYPE_OPTION_CHOICES = (
+    *TRAIN_TYPE_ORDER,
+    TRAIN_TYPE_LEGACY_ALL,
+    *TRAIN_TYPE_ALIAS_TO_NAME.keys(),
+)
+
+
+def normalize_train_types(train_types: Sequence[str] | None) -> tuple[str, ...]:
+    requested = train_types or DEFAULT_TRAIN_TYPES
+    selected: set[str] = set()
+
+    for raw_value in requested:
+        value = raw_value.strip().lower()
+        if not value:
+            continue
+        if value == TRAIN_TYPE_LEGACY_ALL:
+            selected.update(TRAIN_TYPE_ORDER)
+            continue
+        value = TRAIN_TYPE_ALIAS_TO_NAME.get(value, value)
+        if value not in TRAIN_TYPE_CODE_BY_NAME:
+            raise ValueError(f"Unknown train type: {raw_value}")
+        selected.add(value)
+
+    if not selected:
+        selected.update(DEFAULT_TRAIN_TYPES)
+    return tuple(name for name in TRAIN_TYPE_ORDER if name in selected)
+
+
+def train_type_codes(train_types: Sequence[str] | None) -> tuple[str, ...]:
+    codes: list[str] = []
+    seen: set[str] = set()
+    for name in normalize_train_types(train_types):
+        code = TRAIN_TYPE_CODE_BY_NAME[name]
+        if code in seen:
+            continue
+        seen.add(code)
+        codes.append(code)
+    return tuple(codes)
 
 # Station list (from live recon of Korail popup)
 STATIONS = [
