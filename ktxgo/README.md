@@ -1,6 +1,6 @@
 # KTXgo
 
-Playwright(Firefox) 기반 KTX 예매 자동화 CLI.
+Playwright(Firefox) 기반 코레일 열차 예매 자동화 CLI.
 
 코레일 웹사이트의 DynaPath 매크로 차단을 우회하여 열차 검색 → 좌석 예매/예약대기 → 자동결제 → 텔레그램 알림까지 자동화합니다.
 
@@ -64,6 +64,8 @@ python3 -m ktxgo \
   --arrival 부산 \
   --date 20260305 \
   --time 06 \
+  --train-type itx-saemaeul \
+  --train-type mugunghwa \
   --seat general \
   --auto-pay \
   --telegram
@@ -74,8 +76,15 @@ python3 -m ktxgo --no-headless
 # 시도 횟수 제한
 python3 -m ktxgo --max-attempts 100
 
-# 기존 방식(비대화형, 조회된 열차 전체 대상)
+# 기존 방식(비대화형, 기본은 KTX만)
 python3 -m ktxgo --no-interactive
+
+# 일반열차 포함 비대화형 실행
+python3 -m ktxgo \
+  --no-interactive \
+  --train-type itx-saemaeul \
+  --train-type mugunghwa \
+  --train-type itx-cheongchun
 ```
 
 ### CLI 옵션
@@ -87,6 +96,7 @@ python3 -m ktxgo --no-interactive
 | `--date` | 현재+10분 기준 | 출발일 (YYYYMMDD) |
 | `--time` | 현재+10분 기준 | 출발 시간대 (HH) |
 | `--interactive` / `--no-interactive` | TTY에서 interactive | 날짜/시간/열차 선택 프롬프트 사용 여부 |
+| `--train-type` | `ktx` | 반복 지정 가능. `ktx`, `itx-saemaeul`, `mugunghwa`, `tonggeun`, `itx-cheongchun`, `airport`, `legacy-all` (`saemaeul`, `nuriro` alias 지원) |
 | `--seat` | any | `general` / `special` / `any` / `standing` |
 | `--headless` / `--no-headless` | headless | 브라우저 표시 여부 |
 | `--set-card` | off | TTY에서 카드 정보 등록 후 종료 |
@@ -113,7 +123,7 @@ python3 -m ktxgo --no-interactive
  ├─ (interactive 모드) 시작 메뉴
  │   ├─ 카드 등록/수정
  │   └─ 예매 시작
- │      ├─ 출발/도착/날짜/시간 입력
+ │      ├─ 출발/도착/날짜/시간/열차 종류 입력
  │      ├─ 초기 조회 결과에서 예약 시도할 열차 선택 (다중선택 가능)
  │      └─ 좌석 선호 + 자동결제 여부 + 스마트티켓 발권 여부 확인
  │

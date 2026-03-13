@@ -20,10 +20,15 @@ from .config import (
     COOKIE_PATH,
     DEFAULT_ARRIVAL,
     DEFAULT_DEPARTURE,
+    DEFAULT_TRAIN_TYPES,
     DEFAULT_VISIBLE_STATIONS,
     POLL_INTERVAL_S,
     STORAGE_STATE_PATH,
     STATIONS,
+    TRAIN_TYPE_LABEL_BY_NAME,
+    TRAIN_TYPE_OPTION_CHOICES,
+    normalize_train_types,
+    TRAIN_TYPE_CODE_BY_NAME,
 )
 from .korail import KorailAPI, KorailError, Train
 
@@ -95,6 +100,25 @@ def _validate_adults(value: int) -> int:
     if value < 1 or value > 9:
         raise click.BadParameter("adults must be between 1 and 9")
     return value
+
+
+def _normalize_train_types(train_types: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    return normalize_train_types(train_types)
+
+
+def _format_train_type(train: Train) -> str:
+    code = str(
+        train.raw.get("h_trn_gp_cd", "") or train.raw.get("h_trn_clsf_cd", "")
+    ).strip()
+    for train_type, train_code in TRAIN_TYPE_CODE_BY_NAME.items():
+        if train_code == code:
+            label = TRAIN_TYPE_LABEL_BY_NAME[train_type]
+            return "무궁화" if label == "무궁화/누리로" else label
+
+    raw_name = train.train_type.strip()
+    if raw_name.startswith("무궁화"):
+        return "무궁화"
+    return raw_name or "-"
 
 
 def _train_key(train: Train) -> TrainKey:
@@ -198,6 +222,7 @@ def _train_choice_label(idx: int, train: Train) -> str:
         [
             (f"[{idx}]", 4, "right"),
             (train.train_no, 6, "right"),
+            (_format_train_type(train), 10, "left"),
             (f"{train.dep_time}-{train.arr_time}", 12, "left"),
             (f"{train.departure}->{train.arrival}", 15, "left"),
             (f"일반:{train.general_seat}", 14, "left"),
@@ -497,7 +522,8 @@ def _prompt_conditions(
     time_str: str,
     adults: int,
     stations: list[str],
-) -> tuple[str, str, str, str, int]:
+    train_types: tuple[str, ...],
+) -> tuple[str, str, str, str, int, tuple[str, ...]]:
     click.echo("\n대화형 모드: 화살표(↑/↓)로 조회 조건을 선택하세요.")
     if len(stations) < 2:
         click.echo("역 설정에서 최소 2개 역을 선택하세요.")
@@ -529,6 +555,10 @@ def _prompt_conditions(
 
     time_choices = [(f"{hour:02d}시", f"{hour:02d}") for hour in range(24)]
     adult_choices = [(f"{count}명", count) for count in range(1, 10)]
+    train_type_choices = [
+        (TRAIN_TYPE_LABEL_BY_NAME[train_type], train_type)
+        for train_type in TRAIN_TYPE_LABEL_BY_NAME
+    ]
     while True:
         info = _prompt_guarded(
             [
@@ -562,6 +592,12 @@ def _prompt_conditions(
                     choices=adult_choices,
                     default=adults,
                 ),
+                inquirer.Checkbox(
+                    "train_types",
+                    message="열차 종류 선택 (Space:선택, Enter:완료, Ctrl-C:취소)",
+                    choices=train_type_choices,
+                    default=list(train_types),
+                ),
             ]
         )
         if not info:
@@ -578,7 +614,10 @@ def _prompt_conditions(
         time_str = _validate_hour(str(info["time"]))
         adults_raw = info.get("adults", adults)
         adults = _validate_adults(int(str(adults_raw)))
-        return departure, arrival, date, time_str, adults
+        selected_train_types = _normalize_train_types(
+            cast(list[str], info.get("train_types", list(train_types)))
+        )
+        return departure, arrival, date, time_str, adults, selected_train_types
 
 
 def _prompt_target_trains(
@@ -588,10 +627,18 @@ def _prompt_target_trains(
     date: str,
     time_str: str,
     adults: int,
+    train_types: tuple[str, ...],
 ) -> list[TrainKey]:
     click.echo("\n예약 시도할 열차를 선택하세요.")
     while True:
-        trains = api.search(departure, arrival, date, time_str, adults=adults)
+        trains = api.search(
+            departure,
+            arrival,
+            date,
+            time_str,
+            adults=adults,
+            train_types=train_types,
+        )
         if not trains:
             click.echo(f"[{_now()}] 초기 조회 결과가 없습니다.")
             if not click.confirm("같은 조건으로 다시 조회할까요?", default=True):
@@ -904,7 +951,7 @@ def _print_results(trains: list[Train]) -> None:
             [
                 (str(idx), 3, "right"),
                 (train.train_no, 6, "right"),
-                (train.train_type, 10, "left"),
+                (_format_train_type(train), 10, "left"),
                 (route, 15, "left"),
                 (tm, 12, "left"),
                 (train.general_seat, 9, "left"),
@@ -1224,6 +1271,15 @@ def _send_telegram(
 )
 @click.option("--max-attempts", default=0, show_default=True, help="0 means infinite")
 @click.option(
+    "--train-type",
+    "train_types",
+    multiple=True,
+    type=click.Choice(TRAIN_TYPE_OPTION_CHOICES),
+    default=DEFAULT_TRAIN_TYPES,
+    show_default=True,
+    help="Train classes to search and reserve",
+)
+@click.option(
     "--seat",
     type=click.Choice(["general", "special", "any", "standing"]),
     default="any",
@@ -1257,6 +1313,7 @@ def main(
     headless: bool,
     interactive: bool | None,
     max_attempts: int,
+    train_types: tuple[str, ...],
     seat: str,
     set_card_mode: bool,
     auto_pay: bool,
@@ -1284,6 +1341,7 @@ def main(
     adults = _validate_adults(adults)
     date = date or _fmt_date()
     time_str = time_str or _fmt_hour()
+    train_types = _normalize_train_types(train_types)
 
     interactive_mode = sys.stdin.isatty() if interactive is None else interactive
     if interactive_mode and not sys.stdin.isatty():
@@ -1308,8 +1366,14 @@ def main(
                 _set_card_interactive()
                 continue
             sys.exit(0)
-        departure, arrival, date, time_str, adults = _prompt_conditions(
-            departure, arrival, date, time_str, adults, visible_stations
+        departure, arrival, date, time_str, adults, train_types = _prompt_conditions(
+            departure,
+            arrival,
+            date,
+            time_str,
+            adults,
+            visible_stations,
+            train_types,
         )
 
     # Graceful Ctrl+C
@@ -1330,7 +1394,13 @@ def main(
             while True:
                 try:
                     target_trains = _prompt_target_trains(
-                        api, departure, arrival, date, time_str, adults
+                        api,
+                        departure,
+                        arrival,
+                        date,
+                        time_str,
+                        adults,
+                        train_types,
                     )
                     break
                 except KorailError as exc:
@@ -1355,7 +1425,7 @@ def main(
 
         status_line = (
             f"KTXgo — {departure} → {arrival}  {date} {time_str}:00  "
-            f"adults={adults} seat={seat}"
+            f"adults={adults} seat={seat} train-types={','.join(train_types)}"
             f"{' auto-pay' if auto_pay else ''}{' telegram' if telegram else ''}"
         )
 
@@ -1371,7 +1441,14 @@ def main(
                 _render_screen(status_line, target_line, clear_screen=True)
 
             try:
-                trains = api.search(departure, arrival, date, time_str, adults=adults)
+                trains = api.search(
+                    departure,
+                    arrival,
+                    date,
+                    time_str,
+                    adults=adults,
+                    train_types=train_types,
+                )
                 consecutive_errors = 0
             except KorailError as exc:
                 consecutive_errors += 1

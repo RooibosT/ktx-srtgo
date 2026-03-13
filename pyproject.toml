@@ -27,6 +27,12 @@ dependencies = [
     "termcolor"
 ]
 dynamic = ["version"]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
 [tool.setuptools_scm]
 
 [tool.setuptools.packages.find]

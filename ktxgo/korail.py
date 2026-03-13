@@ -22,8 +22,8 @@ from .config import (
     RSV_AVAILABLE,
     RSV_WAITING,
     SEARCH_URL,
-    TRAIN_GROUP_ALL,
     TRAIN_GROUP_KTX,
+    train_type_codes,
 )
 
 
@@ -975,40 +975,29 @@ class KorailAPI:
                 return False
             time.sleep(max(0.05, interval_s))
 
-    def search(
-        self,
-        departure: str,
-        arrival: str,
-        date: str,
-        time_str: str,
-        adults: int = 1,
-    ) -> list[Train]:
-        hh = time_str.zfill(2)
-        params = {
-            "Device": "BH",
-            "Version": "999999999",
-            "radJobId": "1",
-            "selGoTrain": TRAIN_GROUP_ALL,
-            "txtCardPsgCnt": "0",
-            "txtGdNo": "",
-            "txtGoAbrdDt": date,
-            "txtGoEnd": arrival,
-            "txtGoHour": f"{hh}0000",
-            "txtGoStart": departure,
-            "txtJobDv": "",
-            "txtMenuId": "11",
-            "txtPsgFlg_1": str(adults),
-            "txtPsgFlg_2": "0",
-            "txtPsgFlg_3": "0",
-            "txtPsgFlg_4": "0",
-            "txtPsgFlg_5": "0",
-            "txtSeatAttCd_2": "000",
-            "txtSeatAttCd_3": "000",
-            "txtSeatAttCd_4": "015",
-            "txtTrnGpCd": TRAIN_GROUP_KTX,
-            "searchType": "GENERAL",
-        }
-        data = self._api_call(API_SCHEDULE, params)
+    @staticmethod
+    def _train_sort_key(train: Train) -> tuple[str, str, str, str, str, str]:
+        return (
+            train.dep_date,
+            train.dep_time,
+            train.arr_time,
+            train.train_no,
+            train.departure,
+            train.arrival,
+        )
+
+    @staticmethod
+    def _train_identity(train: Train) -> tuple[str, str, str, str, str]:
+        return (
+            train.dep_date,
+            train.train_no,
+            train.dep_time,
+            train.departure,
+            train.arrival,
+        )
+
+    @staticmethod
+    def _trains_from_schedule_payload(data: dict[str, object]) -> list[Train]:
         trn_infos_obj = data.get("trn_infos")
         if not isinstance(trn_infos_obj, dict):
             return []
@@ -1025,6 +1014,54 @@ class KorailAPI:
             if isinstance(row, dict):
                 trains.append(Train.from_schedule(cast(dict[str, object], row)))
         return trains
+
+    def search(
+        self,
+        departure: str,
+        arrival: str,
+        date: str,
+        time_str: str,
+        adults: int = 1,
+        train_types: tuple[str, ...] | None = None,
+    ) -> list[Train]:
+        hh = time_str.zfill(2)
+        seen: set[tuple[str, str, str, str, str]] = set()
+        trains: list[Train] = []
+
+        for train_code in train_type_codes(train_types):
+            params = {
+                "Device": "BH",
+                "Version": "999999999",
+                "radJobId": "1",
+                "selGoTrain": train_code,
+                "txtCardPsgCnt": "0",
+                "txtGdNo": "",
+                "txtGoAbrdDt": date,
+                "txtGoEnd": arrival,
+                "txtGoHour": f"{hh}0000",
+                "txtGoStart": departure,
+                "txtJobDv": "",
+                "txtMenuId": "11",
+                "txtPsgFlg_1": str(adults),
+                "txtPsgFlg_2": "0",
+                "txtPsgFlg_3": "0",
+                "txtPsgFlg_4": "0",
+                "txtPsgFlg_5": "0",
+                "txtSeatAttCd_2": "000",
+                "txtSeatAttCd_3": "000",
+                "txtSeatAttCd_4": "015",
+                "txtTrnGpCd": train_code,
+                "searchType": "GENERAL",
+            }
+            data = self._api_call(API_SCHEDULE, params)
+            for train in self._trains_from_schedule_payload(data):
+                identity = self._train_identity(train)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                trains.append(train)
+
+        return sorted(trains, key=self._train_sort_key)
 
     def reserve(
         self,
