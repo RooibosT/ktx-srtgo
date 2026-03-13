@@ -23,11 +23,13 @@ def _make_train(
     train_no: str = "00123",
     train_type: str = "KTX",
     train_group: str = "100",
+    train_class_name: str | None = None,
 ) -> Train:
     return Train.from_schedule(
         {
             "h_trn_no": train_no,
             "h_car_tp_nm": train_type,
+            "h_trn_clsf_nm": train_class_name or train_type,
             "h_trn_gp_nm": train_type,
             "h_dpt_rs_stn_nm": "서울",
             "h_arv_rs_stn_nm": "부산",
@@ -135,6 +137,7 @@ def test_normalize_train_types_expands_aliases() -> None:
         "mugunghwa",
         "tonggeun",
         "itx-cheongchun",
+        "itx-maeum",
         "airport",
     )
 
@@ -157,6 +160,7 @@ def test_train_types_from_interactive_scope() -> None:
         "mugunghwa",
         "tonggeun",
         "itx-cheongchun",
+        "itx-maeum",
         "airport",
     )
 
@@ -202,15 +206,17 @@ def test_prompt_conditions_uses_train_scope_preset(monkeypatch) -> None:
         "mugunghwa",
         "tonggeun",
         "itx-cheongchun",
+        "itx-maeum",
         "airport",
     )
 
 
 def test_format_train_type_normalizes_display_names() -> None:
     assert cli._format_train_type(_make_train(train_type="KTX")) == "KTX"
-    assert cli._format_train_type(_make_train(train_type="ITX-새마을", train_group="101")) == "ITX-새마을"
-    assert cli._format_train_type(_make_train(train_type="무궁화호", train_group="102")) == "무궁화"
+    assert cli._format_train_type(_make_train(train_type="", train_group="101", train_class_name="ITX-새마을")) == "ITX-새마을"
+    assert cli._format_train_type(_make_train(train_type="", train_group="102", train_class_name="무궁화호")) == "무궁화"
     assert cli._format_train_type(_make_train(train_type="ITX-청춘", train_group="104")) == "ITX-청춘"
+    assert cli._format_train_type(_make_train(train_type="", train_group="101", train_class_name="ITX-마음")) == "ITX-마음"
 
 
 def test_train_choice_label_includes_normalized_train_type() -> None:
@@ -308,6 +314,92 @@ def test_search_requests_each_selected_train_type_and_merges_sorted() -> None:
         (API_SCHEDULE, "102", "102"),
     ]
     assert [train.train_no for train in trains] == ["00077", "00123"]
+
+
+def test_search_filters_itx_maeum_from_shared_101_group() -> None:
+    api = KorailAPI.__new__(KorailAPI)
+    calls: list[tuple[str, str]] = []
+
+    def fake_api_call(endpoint: str, params: dict[str, str]) -> dict[str, object]:
+        del endpoint
+        calls.append((params["selGoTrain"], params["txtTrnGpCd"]))
+        assert params["txtTrnGpCd"] == "101"
+        return {
+            "trn_infos": {
+                "trn_info": [
+                    {
+                        "h_trn_no": "00011",
+                        "h_car_tp_nm": "",
+                        "h_trn_clsf_nm": "ITX-새마을",
+                        "h_trn_gp_nm": "ITX-새마을",
+                        "h_dpt_rs_stn_nm": "서울",
+                        "h_arv_rs_stn_nm": "부산",
+                        "h_dpt_tm_qb": "07:10",
+                        "h_arv_tm_qb": "10:20",
+                        "h_dpt_dt": "20260320",
+                        "h_gen_rsv_nm": "예약가능",
+                        "h_gen_rsv_cd": "11",
+                        "h_spe_rsv_nm": "매진",
+                        "h_spe_rsv_cd": "13",
+                        "h_stnd_rsv_nm": "없음",
+                        "h_wait_rsv_nm": "가능",
+                        "h_wait_rsv_cd": "09",
+                        "h_rcvd_amt": "0045000",
+                        "h_trn_clsf_cd": "101",
+                        "h_trn_gp_cd": "101",
+                        "h_dpt_rs_stn_cd": "0001",
+                        "h_arv_rs_stn_cd": "0020",
+                        "h_run_dt": "20260320",
+                    },
+                    {
+                        "h_trn_no": "00021",
+                        "h_car_tp_nm": "",
+                        "h_trn_clsf_nm": "ITX-마음",
+                        "h_trn_gp_nm": "ITX-새마을",
+                        "h_dpt_rs_stn_nm": "서울",
+                        "h_arv_rs_stn_nm": "부산",
+                        "h_dpt_tm_qb": "07:30",
+                        "h_arv_tm_qb": "10:40",
+                        "h_dpt_dt": "20260320",
+                        "h_gen_rsv_nm": "예약가능",
+                        "h_gen_rsv_cd": "11",
+                        "h_spe_rsv_nm": "매진",
+                        "h_spe_rsv_cd": "13",
+                        "h_stnd_rsv_nm": "없음",
+                        "h_wait_rsv_nm": "가능",
+                        "h_wait_rsv_cd": "09",
+                        "h_rcvd_amt": "0049000",
+                        "h_trn_clsf_cd": "101",
+                        "h_trn_gp_cd": "101",
+                        "h_dpt_rs_stn_cd": "0001",
+                        "h_arv_rs_stn_cd": "0020",
+                        "h_run_dt": "20260320",
+                    },
+                ]
+            }
+        }
+
+    api._api_call = fake_api_call  # type: ignore[method-assign]
+
+    maeum_only = api.search(
+        "서울", "부산", "20260320", "07", adults=1, train_types=("itx-maeum",)
+    )
+    saemaeul_only = api.search(
+        "서울", "부산", "20260320", "07", adults=1, train_types=("itx-saemaeul",)
+    )
+    both = api.search(
+        "서울",
+        "부산",
+        "20260320",
+        "07",
+        adults=1,
+        train_types=("itx-saemaeul", "itx-maeum"),
+    )
+
+    assert calls == [("101", "101"), ("101", "101"), ("101", "101")]
+    assert [train.raw["h_trn_clsf_nm"] for train in maeum_only] == ["ITX-마음"]
+    assert [train.raw["h_trn_clsf_nm"] for train in saemaeul_only] == ["ITX-새마을"]
+    assert [train.raw["h_trn_clsf_nm"] for train in both] == ["ITX-새마을", "ITX-마음"]
 
 
 def test_reserve_uses_train_codes_from_response() -> None:

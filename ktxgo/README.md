@@ -96,7 +96,7 @@ python3 -m ktxgo \
 | `--date` | 현재+10분 기준 | 출발일 (YYYYMMDD) |
 | `--time` | 현재+10분 기준 | 출발 시간대 (HH) |
 | `--interactive` / `--no-interactive` | TTY에서 interactive | 날짜/시간/열차 선택 프롬프트 사용 여부. interactive에서는 `KTX만` / `KTX + ITX/무궁화 등` 프리셋 제공 |
-| `--train-type` | `ktx` | 반복 지정 가능. `ktx`, `itx-saemaeul`, `mugunghwa`, `tonggeun`, `itx-cheongchun`, `airport`, `legacy-all` (`saemaeul`, `nuriro` alias 지원) |
+| `--train-type` | `ktx` | 반복 지정 가능. `ktx`, `itx-saemaeul`, `mugunghwa`, `tonggeun`, `itx-cheongchun`, `itx-maeum`, `airport`, `legacy-all` (`saemaeul`, `nuriro` alias 지원) |
 | `--seat` | any | `general` / `special` / `any` / `standing` |
 | `--headless` / `--no-headless` | headless | 브라우저 표시 여부 |
 | `--set-card` | off | TTY에서 카드 정보 등록 후 종료 |

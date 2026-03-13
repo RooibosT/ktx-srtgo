@@ -100,7 +100,8 @@ class Train:
         }
         return cls(
             train_no=normalized.get("h_trn_no", ""),
-            train_type=normalized.get("h_car_tp_nm", ""),
+            train_type=normalized.get("h_car_tp_nm", "")
+            or normalized.get("h_trn_clsf_nm", ""),
             train_group=normalized.get("h_trn_gp_nm", ""),
             departure=normalized.get("h_dpt_rs_stn_nm", ""),
             arrival=normalized.get("h_arv_rs_stn_nm", ""),
@@ -1015,6 +1016,36 @@ class KorailAPI:
                 trains.append(Train.from_schedule(cast(dict[str, object], row)))
         return trains
 
+    @staticmethod
+    def _matches_requested_train_types(
+        train: Train, requested_train_types: tuple[str, ...] | None
+    ) -> bool:
+        if not requested_train_types:
+            return True
+
+        raw_name = train.train_type.strip()
+        code = str(
+            train.raw.get("h_trn_gp_cd", "") or train.raw.get("h_trn_clsf_cd", "")
+        ).strip()
+
+        for train_type in requested_train_types:
+            if train_type == "ktx" and code == "100":
+                return True
+            if train_type == "itx-saemaeul" and raw_name == "ITX-새마을":
+                return True
+            if train_type == "mugunghwa" and raw_name.startswith("무궁화"):
+                return True
+            if train_type == "tonggeun" and "통근" in raw_name:
+                return True
+            if train_type == "itx-cheongchun" and raw_name == "ITX-청춘":
+                return True
+            if train_type == "itx-maeum" and raw_name == "ITX-마음":
+                return True
+            if train_type == "airport" and "공항" in raw_name:
+                return True
+
+        return False
+
     def search(
         self,
         departure: str,
@@ -1055,6 +1086,8 @@ class KorailAPI:
             }
             data = self._api_call(API_SCHEDULE, params)
             for train in self._trains_from_schedule_payload(data):
+                if not self._matches_requested_train_types(train, train_types):
+                    continue
                 identity = self._train_identity(train)
                 if identity in seen:
                     continue

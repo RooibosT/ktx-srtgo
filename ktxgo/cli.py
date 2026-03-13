@@ -126,6 +126,16 @@ def _interactive_train_scope_from_types(train_types: tuple[str, ...] | list[str]
 
 
 def _format_train_type(train: Train) -> str:
+    raw_name = train.train_type.strip()
+    if raw_name == "ITX-마음":
+        return raw_name
+    if raw_name == "ITX-새마을":
+        return raw_name
+    if raw_name == "ITX-청춘":
+        return raw_name
+    if raw_name.startswith("무궁화"):
+        return "무궁화"
+
     code = str(
         train.raw.get("h_trn_gp_cd", "") or train.raw.get("h_trn_clsf_cd", "")
     ).strip()
@@ -134,9 +144,6 @@ def _format_train_type(train: Train) -> str:
             label = TRAIN_TYPE_LABEL_BY_NAME[train_type]
             return "무궁화" if label == "무궁화/누리로" else label
 
-    raw_name = train.train_type.strip()
-    if raw_name.startswith("무궁화"):
-        return "무궁화"
     return raw_name or "-"
 
 
