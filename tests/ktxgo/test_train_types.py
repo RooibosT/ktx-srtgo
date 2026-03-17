@@ -281,7 +281,15 @@ def test_ensure_login_default_uses_manual_guidance_and_prints_saved_credentials(
     assert manager.saved is True
     joined = "\n".join(messages)
     assert "회원번호: 12345678" in joined
-    assert "비밀번호: 안녕123!" in joined
+    assert "비밀번호: dkssud123!" in joined
+
+
+def test_format_password_for_tty_guidance_leaves_ascii_unchanged() -> None:
+    assert cli._format_password_for_tty_guidance("pw1234!") == "pw1234!"
+
+
+def test_format_password_for_tty_guidance_converts_hangul_to_english_keys() -> None:
+    assert cli._format_password_for_tty_guidance("안녕123!") == "dkssud123!"
 
 
 def test_configure_login_interactive_uses_login_account_wording(monkeypatch) -> None:

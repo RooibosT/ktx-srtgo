@@ -309,6 +309,162 @@ def _mask_login_id(login_id: str) -> str:
     return ("*" * (len(value) - 4)) + value[-4:]
 
 
+_CHOSEONG_KEYS = [
+    "r",
+    "R",
+    "s",
+    "e",
+    "E",
+    "f",
+    "a",
+    "q",
+    "Q",
+    "t",
+    "T",
+    "d",
+    "w",
+    "W",
+    "c",
+    "z",
+    "x",
+    "v",
+    "g",
+]
+_JUNGSEONG_KEYS = [
+    "k",
+    "o",
+    "i",
+    "O",
+    "j",
+    "p",
+    "u",
+    "P",
+    "h",
+    "hk",
+    "ho",
+    "hl",
+    "y",
+    "n",
+    "nj",
+    "np",
+    "nl",
+    "b",
+    "m",
+    "ml",
+    "l",
+]
+_JONGSEONG_KEYS = [
+    "",
+    "r",
+    "R",
+    "rt",
+    "s",
+    "sw",
+    "sg",
+    "e",
+    "f",
+    "fr",
+    "fa",
+    "fq",
+    "ft",
+    "fx",
+    "fv",
+    "fg",
+    "a",
+    "q",
+    "qt",
+    "t",
+    "T",
+    "d",
+    "w",
+    "c",
+    "z",
+    "x",
+    "v",
+    "g",
+]
+_COMPAT_JAMO_KEYS = {
+    "ㄱ": "r",
+    "ㄲ": "R",
+    "ㄳ": "rt",
+    "ㄴ": "s",
+    "ㄵ": "sw",
+    "ㄶ": "sg",
+    "ㄷ": "e",
+    "ㄸ": "E",
+    "ㄹ": "f",
+    "ㄺ": "fr",
+    "ㄻ": "fa",
+    "ㄼ": "fq",
+    "ㄽ": "ft",
+    "ㄾ": "fx",
+    "ㄿ": "fv",
+    "ㅀ": "fg",
+    "ㅁ": "a",
+    "ㅂ": "q",
+    "ㅃ": "Q",
+    "ㅄ": "qt",
+    "ㅅ": "t",
+    "ㅆ": "T",
+    "ㅇ": "d",
+    "ㅈ": "w",
+    "ㅉ": "W",
+    "ㅊ": "c",
+    "ㅋ": "z",
+    "ㅌ": "x",
+    "ㅍ": "v",
+    "ㅎ": "g",
+    "ㅏ": "k",
+    "ㅐ": "o",
+    "ㅑ": "i",
+    "ㅒ": "O",
+    "ㅓ": "j",
+    "ㅔ": "p",
+    "ㅕ": "u",
+    "ㅖ": "P",
+    "ㅗ": "h",
+    "ㅘ": "hk",
+    "ㅙ": "ho",
+    "ㅚ": "hl",
+    "ㅛ": "y",
+    "ㅜ": "n",
+    "ㅝ": "nj",
+    "ㅞ": "np",
+    "ㅟ": "nl",
+    "ㅠ": "b",
+    "ㅡ": "m",
+    "ㅢ": "ml",
+    "ㅣ": "l",
+}
+
+
+def _format_password_for_tty_guidance(password: str) -> str:
+    if not any("HANGUL" in unicodedata.name(ch, "") for ch in password):
+        return password
+
+    converted: list[str] = []
+    for ch in password:
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:
+            syllable_index = code - 0xAC00
+            choseong = syllable_index // 588
+            jungseong = (syllable_index % 588) // 28
+            jongseong = syllable_index % 28
+            converted.append(_CHOSEONG_KEYS[choseong])
+            converted.append(_JUNGSEONG_KEYS[jungseong])
+            converted.append(_JONGSEONG_KEYS[jongseong])
+            continue
+
+        compat = _COMPAT_JAMO_KEYS.get(ch)
+        if compat is not None:
+            converted.append(compat)
+            continue
+
+        converted.append(ch)
+
+    return "".join(converted)
+
+
 def _load_login_credentials() -> tuple[str, str] | None:
     login_id = (keyring.get_password("KTX", "id") or "").strip()
     login_pass = (keyring.get_password("KTX", "pass") or "").strip()
@@ -1062,7 +1218,7 @@ def _ensure_login(
             )
         )
         click.echo(f"회원번호: {login_id}")
-        click.echo(f"비밀번호: {login_pass}")
+        click.echo(f"비밀번호: {_format_password_for_tty_guidance(login_pass)}")
         if not api.login_manual(timeout_s=300):
             click.echo("Login timed out.")
             sys.exit(1)
