@@ -18,6 +18,22 @@ class _DummyManager:
         return False
 
 
+class _LoginManager:
+    def __init__(self, headless: bool):
+        self.page = object()
+        self._headless = headless
+        self.saved = False
+
+    def close(self) -> None:
+        return None
+
+    def start(self) -> None:
+        return None
+
+    def save_cookies(self) -> None:
+        self.saved = True
+
+
 def _make_train(
     *,
     train_no: str = "00123",
@@ -75,7 +91,11 @@ def test_cli_defaults_to_ktx_train_type(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "BrowserManager", _DummyManager)
     monkeypatch.setattr(cli, "KorailAPI", DummyAPI)
-    monkeypatch.setattr(cli, "_ensure_login", lambda api, manager, headless: api)
+    monkeypatch.setattr(
+        cli,
+        "_ensure_login",
+        lambda api, manager, headless, manual_login_only=False: api,
+    )
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
     monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
 
@@ -108,7 +128,11 @@ def test_cli_passes_multiple_train_types(monkeypatch) -> None:
 
     monkeypatch.setattr(cli, "BrowserManager", _DummyManager)
     monkeypatch.setattr(cli, "KorailAPI", DummyAPI)
-    monkeypatch.setattr(cli, "_ensure_login", lambda api, manager, headless: api)
+    monkeypatch.setattr(
+        cli,
+        "_ensure_login",
+        lambda api, manager, headless, manual_login_only=False: api,
+    )
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
     monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
 
@@ -130,6 +154,168 @@ def test_cli_passes_multiple_train_types(monkeypatch) -> None:
     assert search_calls == [("itx-saemaeul", "mugunghwa")]
 
 
+def test_cli_passes_manual_login_only_flag(monkeypatch) -> None:
+    search_calls: list[tuple[str, ...] | None] = []
+    captured: dict[str, bool] = {}
+
+    class DummyAPI:
+        def __init__(self, page: object):
+            del page
+
+        def search(
+            self,
+            departure: str,
+            arrival: str,
+            date: str,
+            time_str: str,
+            adults: int = 1,
+            train_types: tuple[str, ...] | None = None,
+        ) -> list[object]:
+            del departure, arrival, date, time_str, adults
+            search_calls.append(train_types)
+            return []
+
+    def fake_ensure_login(
+        api: object, manager: object, headless: bool, manual_login_only: bool
+    ) -> object:
+        del manager, headless
+        captured["manual_login_only"] = manual_login_only
+        return api
+
+    monkeypatch.setattr(cli, "BrowserManager", _DummyManager)
+    monkeypatch.setattr(cli, "KorailAPI", DummyAPI)
+    monkeypatch.setattr(cli, "_ensure_login", fake_ensure_login)
+    monkeypatch.setattr(cli.time, "sleep", lambda _: None)
+    monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        ["--no-interactive", "--max-attempts", "1", "--manual-login-only"],
+    )
+
+    assert result.exit_code == 0
+    assert captured == {"manual_login_only": True}
+    assert search_calls == [("ktx",)]
+
+
+def test_ensure_login_manual_login_only_skips_prefill(monkeypatch) -> None:
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.manual_login_called = False
+            self.prefill_called = False
+
+        def wait_for_login_stable(
+            self, timeout_s: float, interval_s: float, stable_checks: int
+        ) -> bool:
+            del timeout_s, interval_s, stable_checks
+            return False
+
+        def prefill_login_form(self, member_id: str, password: str) -> bool:
+            del member_id, password
+            self.prefill_called = True
+            return True
+
+        def login_manual(self, timeout_s: int, open_login_page: bool = True) -> bool:
+            del timeout_s, open_login_page
+            self.manual_login_called = True
+            return True
+
+    monkeypatch.setattr(cli, "_load_login_credentials", lambda: ("id", "pw"))
+    monkeypatch.setattr(cli.click, "echo", lambda *args, **kwargs: None)
+
+    api = DummyAPI()
+    manager = _LoginManager(headless=False)
+
+    result = cli._ensure_login(api, manager, headless=False, manual_login_only=True)
+
+    assert result is api
+    assert api.manual_login_called is True
+    assert api.prefill_called is False
+    assert manager.saved is True
+
+
+def test_ensure_login_default_uses_manual_guidance_and_prints_saved_credentials(
+    monkeypatch,
+) -> None:
+    messages: list[str] = []
+
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.manual_login_called = False
+            self.prefill_called = False
+
+        def wait_for_login_stable(
+            self, timeout_s: float, interval_s: float, stable_checks: int
+        ) -> bool:
+            del timeout_s, interval_s, stable_checks
+            return False
+
+        def prefill_login_form(self, member_id: str, password: str) -> bool:
+            del member_id, password
+            self.prefill_called = True
+            return True
+
+        def login_manual(self, timeout_s: int, open_login_page: bool = True) -> bool:
+            del timeout_s, open_login_page
+            self.manual_login_called = True
+            return True
+
+    monkeypatch.setattr(
+        cli, "_load_login_credentials", lambda: ("12345678", "안녕123!")
+    )
+    monkeypatch.setattr(
+        cli.click,
+        "echo",
+        lambda message="", *args, **kwargs: messages.append(str(message)),
+    )
+
+    api = DummyAPI()
+    manager = _LoginManager(headless=False)
+
+    result = cli._ensure_login(api, manager, headless=False)
+
+    assert result is api
+    assert api.manual_login_called is True
+    assert api.prefill_called is False
+    assert manager.saved is True
+    joined = "\n".join(messages)
+    assert "회원번호: 12345678" in joined
+    assert "비밀번호: 안녕123!" in joined
+
+
+def test_configure_login_interactive_uses_login_account_wording(monkeypatch) -> None:
+    messages: list[str] = []
+    captured_choices: list[list[tuple[str, str]]] = []
+
+    class _FakeCookiePath:
+        def is_file(self) -> bool:
+            return False
+
+    monkeypatch.setattr(cli, "_load_login_credentials", lambda: None)
+    monkeypatch.setattr(cli, "COOKIE_PATH", _FakeCookiePath())
+    monkeypatch.setattr(
+        cli.click,
+        "echo",
+        lambda message="", *args, **kwargs: messages.append(str(message)),
+    )
+
+    def fake_list_input_guarded(
+        *, message: str, choices: list[object], **kwargs: object
+    ) -> str:
+        del message, kwargs
+        captured_choices.append(list(choices))
+        return "cancel"
+
+    monkeypatch.setattr(cli, "_list_input_guarded", fake_list_input_guarded)
+
+    cli._configure_login_interactive()
+
+    joined = "\n".join(messages)
+    assert "로그인 계정: 미설정" in joined
+    assert captured_choices[0][0] == ("로그인 계정 등록/수정", "credentials")
+
+
 def test_normalize_train_types_expands_aliases() -> None:
     assert cli._normalize_train_types(("legacy-all", "nuriro", "ktx")) == (
         "ktx",
@@ -145,9 +331,7 @@ def test_normalize_train_types_expands_aliases() -> None:
 def test_interactive_train_scope_from_types() -> None:
     assert cli._interactive_train_scope_from_types(("ktx",)) == "ktx_only"
     assert (
-        cli._interactive_train_scope_from_types(
-            ("ktx", "itx-saemaeul", "mugunghwa")
-        )
+        cli._interactive_train_scope_from_types(("ktx", "itx-saemaeul", "mugunghwa"))
         == "ktx_plus_general"
     )
 
@@ -167,9 +351,9 @@ def test_train_types_from_interactive_scope() -> None:
 
 def test_interactive_train_scope_label_uses_itx_wording() -> None:
     assert (
-        ("KTX + ITX/무궁화 등", "ktx_plus_general")
-        in cli._INTERACTIVE_TRAIN_SCOPE_CHOICES
-    )
+        "KTX + ITX/무궁화 등",
+        "ktx_plus_general",
+    ) in cli._INTERACTIVE_TRAIN_SCOPE_CHOICES
 
 
 def test_prompt_conditions_uses_train_scope_preset(monkeypatch) -> None:
@@ -213,10 +397,28 @@ def test_prompt_conditions_uses_train_scope_preset(monkeypatch) -> None:
 
 def test_format_train_type_normalizes_display_names() -> None:
     assert cli._format_train_type(_make_train(train_type="KTX")) == "KTX"
-    assert cli._format_train_type(_make_train(train_type="", train_group="101", train_class_name="ITX-새마을")) == "ITX-새마을"
-    assert cli._format_train_type(_make_train(train_type="", train_group="102", train_class_name="무궁화호")) == "무궁화"
-    assert cli._format_train_type(_make_train(train_type="ITX-청춘", train_group="104")) == "ITX-청춘"
-    assert cli._format_train_type(_make_train(train_type="", train_group="101", train_class_name="ITX-마음")) == "ITX-마음"
+    assert (
+        cli._format_train_type(
+            _make_train(train_type="", train_group="101", train_class_name="ITX-새마을")
+        )
+        == "ITX-새마을"
+    )
+    assert (
+        cli._format_train_type(
+            _make_train(train_type="", train_group="102", train_class_name="무궁화호")
+        )
+        == "무궁화"
+    )
+    assert (
+        cli._format_train_type(_make_train(train_type="ITX-청춘", train_group="104"))
+        == "ITX-청춘"
+    )
+    assert (
+        cli._format_train_type(
+            _make_train(train_type="", train_group="101", train_class_name="ITX-마음")
+        )
+        == "ITX-마음"
+    )
 
 
 def test_train_choice_label_includes_normalized_train_type() -> None:

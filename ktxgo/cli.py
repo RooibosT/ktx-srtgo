@@ -108,7 +108,9 @@ def _validate_adults(value: int) -> int:
     return value
 
 
-def _normalize_train_types(train_types: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+def _normalize_train_types(
+    train_types: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
     return normalize_train_types(train_types)
 
 
@@ -118,7 +120,9 @@ def _train_types_from_interactive_scope(scope: str) -> tuple[str, ...]:
     return _normalize_train_types(("legacy-all",))
 
 
-def _interactive_train_scope_from_types(train_types: tuple[str, ...] | list[str] | None) -> str:
+def _interactive_train_scope_from_types(
+    train_types: tuple[str, ...] | list[str] | None,
+) -> str:
     normalized = _normalize_train_types(train_types)
     if normalized == DEFAULT_TRAIN_TYPES:
         return _INTERACTIVE_SCOPE_KTX_ONLY
@@ -333,7 +337,7 @@ def _set_login_credentials_interactive() -> bool:
         ]
     )
     if not login_info:
-        click.echo("자동로그인 계정 설정이 취소되었습니다.")
+        click.echo("로그인 계정 설정이 취소되었습니다.")
         return False
 
     login_id = str(login_info.get("id", "")).strip()
@@ -344,9 +348,7 @@ def _set_login_credentials_interactive() -> bool:
 
     keyring.set_password("KTX", "id", login_id)
     keyring.set_password("KTX", "pass", login_pass)
-    click.echo(
-        f"자동로그인 계정이 저장되었습니다. (회원번호: {_mask_login_id(login_id)})"
-    )
+    click.echo(f"로그인 계정이 저장되었습니다. (회원번호: {_mask_login_id(login_id)})")
     return True
 
 
@@ -431,16 +433,16 @@ def _configure_login_interactive() -> None:
     click.echo("\n로그인 설정")
     creds = _load_login_credentials()
     if creds is None:
-        click.echo("자동로그인 계정: 미설정")
+        click.echo("로그인 계정: 미설정")
     else:
-        click.echo(f"자동로그인 계정: {_mask_login_id(creds[0])}")
+        click.echo(f"로그인 계정: {_mask_login_id(creds[0])}")
 
     if not COOKIE_PATH.is_file():
         click.echo("저장된 로그인 세션이 없습니다.")
         choice = _list_input_guarded(
             message="로그인 설정",
             choices=[
-                ("자동로그인 계정 등록/수정", "credentials"),
+                ("로그인 계정 등록/수정", "credentials"),
                 ("지금 로그인 창 열기 (수동 로그인)", "login"),
                 ("취소", "cancel"),
             ],
@@ -460,7 +462,7 @@ def _configure_login_interactive() -> None:
             message="로그인 정보 처리",
             choices=[
                 ("로그인 정보 변경 (다시 로그인)", "change"),
-                ("자동로그인 계정 등록/수정", "credentials"),
+                ("로그인 계정 등록/수정", "credentials"),
                 ("취소", "cancel"),
             ],
         )
@@ -478,7 +480,7 @@ def _configure_login_interactive() -> None:
         choices=[
             ("현재 로그인 정보 유지", "keep"),
             ("로그인 정보 변경 (다시 로그인)", "change"),
-            ("자동로그인 계정 등록/수정", "credentials"),
+            ("로그인 계정 등록/수정", "credentials"),
             ("취소", "cancel"),
         ],
     )
@@ -991,7 +993,12 @@ def _print_results(trains: list[Train]) -> None:
         click.echo(row)
 
 
-def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> KorailAPI:
+def _ensure_login(
+    api: KorailAPI,
+    manager: BrowserManager,
+    headless: bool,
+    manual_login_only: bool = False,
+) -> KorailAPI:
     """Ensure the session is authenticated. Returns (possibly new) KorailAPI instance."""
     if api.wait_for_login_stable(timeout_s=0.8, interval_s=0.25, stable_checks=1):
         click.echo(f"[{_now()}] Logged in via saved session.")
@@ -1016,43 +1023,58 @@ def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> Ko
             sys.exit(1)
         return api_local
 
+    if manual_login_only:
+        if manager._headless:
+            click.echo(f"[{_now()}] Restarting browser for manual login only mode...")
+            api = _restart_browser(headed=True)
+        click.echo(
+            f"[{_now()}] Manual login only mode enabled. "
+            "Please log in through the browser window (5 min timeout)."
+        )
+        if not api.login_manual(timeout_s=300):
+            click.echo("Login timed out.")
+            sys.exit(1)
+        manager.save_cookies()
+        click.echo(f"[{_now()}] Login successful — session saved.")
+        if headless:
+            return _reload_headless_after_login()
+        return api
+
     creds = _load_login_credentials()
     if creds is not None:
         login_id, login_pass = creds
-        masked_id = _mask_login_id(login_id)
         if manager._headless:
             click.echo(
                 f"[{_now()}] Saved session is invalid. "
-                f"Using visible assisted auto-login ({masked_id})..."
+                "Switching to visible manual login..."
             )
             api = _restart_browser(headed=True)
         else:
             click.echo(
-                f"[{_now()}] Saved session is invalid. Preparing assisted login ({masked_id})..."
+                f"[{_now()}] Saved session is invalid. Opening manual login window..."
             )
-
-        prefilled = api.prefill_login_form(login_id, login_pass)
-        if prefilled:
-            click.echo(f"[{_now()}] 로그인 정보 자동입력 완료 ({masked_id}).")
-            click.echo(
-                colored(
-                    "[로그인 필요] 비밀번호 칸을 한 번 클릭한 뒤 로그인 버튼을 직접 눌러주세요.",
-                    "white",
-                    "on_red",
-                    attrs=["bold"],
-                )
+        click.echo(
+            colored(
+                "[로그인 필요] 브라우저 창에서 직접 로그인해주세요.",
+                "white",
+                "on_red",
+                attrs=["bold"],
             )
-            if not api.login_manual(timeout_s=300, open_login_page=False):
-                click.echo("Login timed out.")
-                sys.exit(1)
-            manager.save_cookies()
-            click.echo(f"[{_now()}] Login successful — session saved.")
-            if headless:
-                return _reload_headless_after_login()
-            return api
-        click.echo(f"[{_now()}] Assisted prefill failed. Falling back to manual login.")
+        )
+        click.echo(f"회원번호: {login_id}")
+        click.echo(f"비밀번호: {login_pass}")
+        if not api.login_manual(timeout_s=300):
+            click.echo("Login timed out.")
+            sys.exit(1)
+        manager.save_cookies()
+        click.echo(f"[{_now()}] Login successful — session saved.")
+        if headless:
+            return _reload_headless_after_login()
+        return api
     else:
-        click.echo(f"[{_now()}] No saved auto-login credentials. Skipping auto-login.")
+        click.echo(
+            f"[{_now()}] No saved login credentials. Opening manual login window."
+        )
 
     # Fallback to manual login — must open visible browser
     if manager._headless:
@@ -1292,6 +1314,12 @@ def _send_telegram(
 )
 @click.option("--headless/--no-headless", default=True, show_default=True)
 @click.option(
+    "--manual-login-only",
+    is_flag=True,
+    default=False,
+    help="Skip assisted login and wait for fully manual browser login",
+)
+@click.option(
     "--interactive/--no-interactive",
     default=None,
     help="Prompt for date/time/train selection (default: on for TTY)",
@@ -1338,6 +1366,7 @@ def main(
     time_str: str | None,
     adults: int,
     headless: bool,
+    manual_login_only: bool,
     interactive: bool | None,
     max_attempts: int,
     train_types: tuple[str, ...],
@@ -1412,7 +1441,7 @@ def main(
 
     with BrowserManager(headless=headless) as manager:
         api = KorailAPI(manager.page)
-        api = _ensure_login(api, manager, headless)
+        api = _ensure_login(api, manager, headless, manual_login_only)
         target_trains: list[TrainKey] | None = None
         target_line: str | None = None
         clear_each_attempt = sys.stdout.isatty()
@@ -1436,7 +1465,7 @@ def main(
                         click.echo(
                             f"[{_now()}] Session expired before selection. Re-authenticating..."
                         )
-                        api = _ensure_login(api, manager, headless)
+                        api = _ensure_login(api, manager, headless, manual_login_only)
                         continue
                     click.echo(f"[{_now()}] Initial search error: {exc}")
                     sys.exit(1)
@@ -1482,7 +1511,7 @@ def main(
                 code = exc.code or ""
                 if code in _SESSION_EXPIRED_CODES:
                     click.echo(f"[{_now()}] Session expired. Re-authenticating...")
-                    api = _ensure_login(api, manager, headless)
+                    api = _ensure_login(api, manager, headless, manual_login_only)
                     continue
                 click.echo(f"[{_now()}] Search error: {exc}")
                 if consecutive_errors >= 5:
@@ -1540,7 +1569,7 @@ def main(
                         click.echo(
                             f"[{_now()}] Session expired during reserve. Re-authenticating..."
                         )
-                        api = _ensure_login(api, manager, headless)
+                        api = _ensure_login(api, manager, headless, manual_login_only)
                         break  # Restart search loop
                     click.echo(f"  → Reserve failed: {exc}")
                     continue
