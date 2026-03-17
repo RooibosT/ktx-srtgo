@@ -129,6 +129,126 @@ class KorailAPI:
         self.last_auto_login_detail: str | None = None
 
     @staticmethod
+    def _format_prefill_login_state(snapshot: dict[str, object]) -> str:
+        hidden_fields = snapshot.get("hidden_security_fields", [])
+        hidden_count = len(hidden_fields) if isinstance(hidden_fields, list) else 0
+        return (
+            "member_mode={member_mode} id={id_present} pw={password_present} "
+            "login_btn={login_button} pw_readonly={pw_readonly} "
+            "pw_disabled={pw_disabled} hidden_fields={hidden_count} nshc={nshc}"
+        ).format(
+            member_mode=snapshot.get("member_mode_present"),
+            id_present=snapshot.get("id_present"),
+            password_present=snapshot.get("password_present"),
+            login_button=snapshot.get("login_button_present"),
+            pw_readonly=snapshot.get("password_read_only"),
+            pw_disabled=snapshot.get("password_disabled"),
+            hidden_count=hidden_count,
+            nshc=snapshot.get("nshc_present"),
+        )
+
+    def _collect_prefill_login_state(self) -> dict[str, object]:
+        try:
+            raw = cast(
+                dict[str, object],
+                self.page.evaluate(
+                    """() => {
+                    const memberMode = document.querySelector('button#memberNo');
+                    const idInput = document.querySelector('input#id');
+                    const pwInput = document.querySelector('input#password');
+                    const loginButton = document.querySelector('section.loginWrap div.mem_wrap div.btnWrap > button.btn_bn-depblue');
+                    const hiddenSecurityFields = pwInput
+                        ? Array.from((pwInput.parentElement || document).querySelectorAll('input[type="hidden"]'))
+                            .map((el) => el.id || el.name || '')
+                            .filter((name) => /password|passwd|pwd|nfilter|secure/i.test(name))
+                        : [];
+
+                    return {
+                        memberModePresent: !!memberMode,
+                        idPresent: !!idInput,
+                        passwordPresent: !!pwInput,
+                        passwordReadOnly: !!pwInput && !!pwInput.readOnly,
+                        passwordDisabled: !!pwInput && !!pwInput.disabled,
+                        loginButtonPresent: !!loginButton,
+                        hiddenSecurityFields,
+                        nshcPresent: typeof window.nshc !== 'undefined',
+                    };
+                }"""
+                ),
+            )
+        except Exception:
+            raw = {}
+
+        hidden_fields_obj = raw.get("hiddenSecurityFields", [])
+        hidden_fields = (
+            [str(item) for item in hidden_fields_obj if item]
+            if isinstance(hidden_fields_obj, list)
+            else []
+        )
+        return {
+            "member_mode_present": bool(raw.get("memberModePresent", False)),
+            "id_present": bool(raw.get("idPresent", False)),
+            "password_present": bool(raw.get("passwordPresent", False)),
+            "password_read_only": bool(raw.get("passwordReadOnly", False)),
+            "password_disabled": bool(raw.get("passwordDisabled", False)),
+            "login_button_present": bool(raw.get("loginButtonPresent", False)),
+            "hidden_security_fields": hidden_fields,
+            "nshc_present": bool(raw.get("nshcPresent", False)),
+        }
+
+    def _wait_for_prefill_login_ready(
+        self,
+        *,
+        max_checks: int = 4,
+        poll_ms: int = 200,
+        settle_ms: int = 250,
+    ) -> tuple[bool, dict[str, object]]:
+        snapshot: dict[str, object] = {}
+        checks = max(1, max_checks)
+        for attempt in range(checks):
+            snapshot = self._collect_prefill_login_state()
+            ready = (
+                bool(snapshot.get("member_mode_present"))
+                and bool(snapshot.get("id_present"))
+                and bool(snapshot.get("password_present"))
+                and bool(snapshot.get("login_button_present"))
+                and not bool(snapshot.get("password_disabled"))
+            )
+            if ready:
+                self.page.wait_for_timeout(max(0, settle_ms))
+                return True, snapshot
+            if attempt + 1 < checks:
+                self.page.wait_for_timeout(max(0, poll_ms))
+        return False, snapshot
+
+    @staticmethod
+    def _type_prefill_value(
+        field: Locator,
+        value: str,
+        *,
+        delay: int,
+        timeout: int,
+    ) -> None:
+        field.first.click(timeout=2_000)
+        field.first.press("ControlOrMeta+A", timeout=1_000)
+        field.first.press("Backspace", timeout=1_000)
+        field.first.type(value, delay=delay, timeout=timeout)
+
+    def _stabilize_prefill_password_state(
+        self,
+        blur_target: Locator,
+        *,
+        settle_ms: int = 700,
+    ) -> None:
+        blur_target.first.click(timeout=2_000)
+        self.page.wait_for_timeout(settle_ms)
+
+    def _wait_before_prefilled_submit(self, attempt_idx: int) -> int:
+        wait_ms = 1200 + (max(0, attempt_idx) * 600)
+        self.page.wait_for_timeout(wait_ms)
+        return wait_ms
+
+    @staticmethod
     def _pick_visible_locator(
         scope: Frame | Locator,
         selectors: list[str],
@@ -410,6 +530,8 @@ class KorailAPI:
 
     def prefill_login_form(self, member_id: str, password: str) -> bool:
         """Open login page and prefill credentials without submitting."""
+        self.last_auto_login_error = None
+        self.last_auto_login_detail = None
         member_id = member_id.strip()
         if not member_id or not password:
             return False
@@ -419,6 +541,15 @@ class KorailAPI:
             self.page.wait_for_load_state("networkidle", timeout=5_000)
         except Exception:
             pass
+
+        ready, ready_snapshot = self._wait_for_prefill_login_ready()
+        if not ready:
+            self.last_auto_login_error = "prefill_not_ready"
+            self.last_auto_login_detail = (
+                "prefill readiness failed: "
+                f"{self._format_prefill_login_state(ready_snapshot)}"
+            )
+            return False
 
         member_mode = self.page.locator("button#memberNo")
         id_input = self.page.locator("input#id")
@@ -440,19 +571,21 @@ class KorailAPI:
             pass
 
         try:
-            id_input.first.click(timeout=2_000)
-            id_input.first.fill("", timeout=2_000)
-            id_input.first.type(member_id, delay=70, timeout=4_000)
+            self._type_prefill_value(id_input, member_id, delay=70, timeout=4_000)
 
-            pw_input.first.click(timeout=2_000)
-            pw_input.first.fill("", timeout=2_000)
-            pw_input.first.type(password, delay=90, timeout=5_000)
-            # Korail login page is sensitive right after password typing.
-            # Re-focus password input once more to stabilize the submit state.
-            pw_input.first.click(timeout=2_000)
-            self.page.wait_for_timeout(700)
+            self._type_prefill_value(pw_input, password, delay=90, timeout=5_000)
+            self._stabilize_prefill_password_state(id_input)
         except Exception:
+            self.last_auto_login_error = "prefill_failed"
+            self.last_auto_login_detail = (
+                "prefill interaction failed after readiness: "
+                f"{self._format_prefill_login_state(ready_snapshot)}"
+            )
             return False
+        self.last_auto_login_detail = (
+            "prefill ready / pw_transition=blur_to_id: "
+            f"{self._format_prefill_login_state(ready_snapshot)}"
+        )
         return True
 
     def submit_prefilled_login(
@@ -491,10 +624,11 @@ class KorailAPI:
 
                 try:
                     pw_input.first.click(timeout=2_000)
-                    self.page.wait_for_timeout(780 + (attempt_idx * 240))
+                    wait_ms = self._wait_before_prefilled_submit(attempt_idx)
                     login_btn.first.click(timeout=2_000)
                     self.last_auto_login_detail = (
                         "submit_method=human_like_pw_click_then_login_click"
+                        f" wait_ms={wait_ms}"
                     )
                 except Exception:
                     self.last_auto_login_error = "submit_click_failed"
