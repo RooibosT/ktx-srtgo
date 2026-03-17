@@ -108,7 +108,9 @@ def _validate_adults(value: int) -> int:
     return value
 
 
-def _normalize_train_types(train_types: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+def _normalize_train_types(
+    train_types: tuple[str, ...] | list[str] | None,
+) -> tuple[str, ...]:
     return normalize_train_types(train_types)
 
 
@@ -118,7 +120,9 @@ def _train_types_from_interactive_scope(scope: str) -> tuple[str, ...]:
     return _normalize_train_types(("legacy-all",))
 
 
-def _interactive_train_scope_from_types(train_types: tuple[str, ...] | list[str] | None) -> str:
+def _interactive_train_scope_from_types(
+    train_types: tuple[str, ...] | list[str] | None,
+) -> str:
     normalized = _normalize_train_types(train_types)
     if normalized == DEFAULT_TRAIN_TYPES:
         return _INTERACTIVE_SCOPE_KTX_ONLY
@@ -1036,7 +1040,7 @@ def _ensure_login(api: KorailAPI, manager: BrowserManager, headless: bool) -> Ko
             click.echo(f"[{_now()}] 로그인 정보 자동입력 완료 ({masked_id}).")
             click.echo(
                 colored(
-                    "[로그인 필요] 비밀번호 칸을 한 번 클릭한 뒤 로그인 버튼을 직접 눌러주세요.",
+                    "[로그인 필요] 비밀번호 칸을 한 번 클릭한 뒤 회원번호 마지막에 Space 키를 입력하고 로그인 버튼을 직접 눌러주세요.",
                     "white",
                     "on_red",
                     attrs=["bold"],
