@@ -163,3 +163,5 @@ cython_debug/
 .install_manager
 uv.lock
 tmp/
+docs/
+.sisyphus/
