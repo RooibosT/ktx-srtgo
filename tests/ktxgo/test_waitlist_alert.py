@@ -222,6 +222,8 @@ def test_cli_registers_waitlist_alert_after_waitlist_success(monkeypatch) -> Non
     result = runner.invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -265,6 +267,8 @@ def test_cli_keeps_waitlist_success_when_alert_registration_fails(monkeypatch) -
     result = runner.invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -605,6 +609,7 @@ def test_main_persists_auto_pay_false_after_card_check_fallback(monkeypatch) -> 
         smart_ticket=True,
         telegram=False,
         waitlist_alert_phone=None,
+        api_backend="playwright",
     )
 
     assert ("KTX", "auto_pay", "0") in stored

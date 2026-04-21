@@ -48,7 +48,7 @@
 `run.sh`는 다음을 자동으로 처리합니다.
 - `install.sh`에서 선택한 환경(`uv`/`conda`) 활성화
 - 화살표 메뉴로 `KTX` / `SRT` 선택 후 실행
-- `KTX`는 저장 세션이 만료되면 `KTX id/pass`로 Playwright 자동로그인을 시도하고, 실패 시 브라우저 계정 자동입력 후 사용자 클릭 로그인으로 전환합니다.
+- `KTX`는 기본적으로 **Chromium extension 백엔드**를 사용합니다. 재사용 가능한 세션이 있으면 숨겨진 Chromium에서 바로 조회/예약 API를 호출하고, 첫 실행 또는 세션 만료 시에는 Chromium 창을 열어 코레일 로그인을 받은 뒤 창을 자동 최소화해 같은 로그인 브라우저에서 루프를 계속합니다.
 
 직접 지정 실행:
 
@@ -85,7 +85,8 @@ python -m ktxgo --set-card
 
 ## KTXgo 주요 기능
 
-- 세션 저장/재사용 + 만료 시 Playwright 자동로그인(실패 시 계정 자동입력 + 사용자 클릭 로그인)
+- Chromium extension 백엔드로 코레일 웹 페이지 안에서 조회/예약 API 호출
+- 세션 저장/재사용 + 만료 시 Chromium 창에서 수동 로그인 후 자동 최소화
 - TTY 메뉴
   - 예매 시작
   - 예매 정보 확인 (예약/발권 내역)
@@ -98,6 +99,8 @@ python -m ktxgo --set-card
 - 좌석 매진 시 예약대기 가능 열차 자동 감지 및 예약대기 신청
 - 예약대기 성공 시 좌석배정 SMS 알림 전화번호 자동 등록
 - 자동결제(스마트티켓 기본 ON), 텔레그램 알림
+
+KTX용 Chromium은 `install.sh`가 Playwright `1.42.0`의 Chromium(확인된 동작 버전)을 함께 설치합니다. 기본 탐색 경로는 `~/.cache/ms-playwright/chromium-1105/chrome-linux/chrome`이며, 필요하면 `python -m ktxgo --extension-chromium /path/to/chrome`으로 직접 지정할 수 있습니다.
 
 세부 옵션/구조 설명은 [ktxgo/README.md](ktxgo/README.md)를 참고하세요.
 

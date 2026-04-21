@@ -165,6 +165,8 @@ def test_cli_passes_manual_login_flags_and_disables_saved_session(
     result = CliRunner().invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -373,6 +375,8 @@ def test_cli_pure_login_window_starts_at_login_without_ensure_or_polling(
     result = CliRunner().invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -502,6 +506,8 @@ def test_cli_pure_login_debug_configures_browser_har(monkeypatch, tmp_path) -> N
     result = CliRunner().invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -553,6 +559,8 @@ def test_cli_pure_login_window_can_enable_stealth(monkeypatch) -> None:
     result = CliRunner().invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -604,6 +612,8 @@ def test_cli_passes_browser_executable_and_profile_dir(monkeypatch, tmp_path) ->
     result = CliRunner().invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -770,6 +780,8 @@ def test_cli_passes_fingerprint_context_options(monkeypatch) -> None:
     result = CliRunner().invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -832,6 +844,8 @@ def test_cli_passes_webdriver_mode_false(monkeypatch) -> None:
     result = CliRunner().invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",

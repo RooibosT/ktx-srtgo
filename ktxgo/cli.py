@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import signal
 import subprocess
 import sys
@@ -9,7 +10,8 @@ import time
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
+from urllib.parse import urlencode
 
 import click
 import inquirer
@@ -21,6 +23,7 @@ from srtgo.keyring_bootstrap import configure_keyring_backend
 
 from .browser import BrowserManager
 from .config import (
+    BASE_URL,
     COOKIE_PATH,
     DATA_DIR,
     DEFAULT_ARRIVAL,
@@ -31,15 +34,18 @@ from .config import (
     POLL_INTERVAL_S,
     STORAGE_STATE_PATH,
     STATIONS,
+    STATION_CODE_BY_NAME,
     TRAIN_TYPE_LABEL_BY_NAME,
     TRAIN_TYPE_OPTION_CHOICES,
     normalize_train_types,
     TRAIN_TYPE_CODE_BY_NAME,
+    train_type_codes,
 )
 from .cookie_import import (
     import_firefox_korail_cookies,
     import_korail_cookies,
 )
+from .extension_backend import ExtensionBrowserRunner, ExtensionKorailAPI
 from .korail import KorailAPI, KorailError, Train
 
 try:
@@ -1918,6 +1924,360 @@ def _run_external_firefox_login(
     return imported_count
 
 
+def _build_external_firefox_search_url(
+    *,
+    departure: str,
+    arrival: str,
+    date: str,
+    time_str: str,
+    adults: int,
+    train_types: tuple[str, ...],
+) -> str:
+    train_code = train_type_codes(train_types)[0]
+    hh = time_str.zfill(2)
+    params = {
+        "searchType": "GENERAL",
+        "txtGoStart": departure,
+        "txtGoEnd": arrival,
+        "txtGoAbrdDt": date,
+        "txtGoHour": f"{hh}0000",
+        "txtPsgFlg_1": str(adults),
+        "txtPsgFlg_2": "0",
+        "txtPsgFlg_3": "0",
+        "txtPsgFlg_4": "0",
+        "txtPsgFlg_5": "0",
+        "txtSeatAttCd_4": "015",
+        "txtTrnGpCd": train_code,
+        "selGoTrain": train_code,
+        "txtMenuId": "11",
+        "radJobId": "1",
+        "srtCheckYn": "N",
+        "ebizCrossCheck": "N",
+        "adjStnScdlOfrFlg": "N",
+        "rtYn": "N",
+    }
+    dep_code = STATION_CODE_BY_NAME.get(departure)
+    arr_code = STATION_CODE_BY_NAME.get(arrival)
+    if dep_code:
+        params["txtGoStartCode"] = dep_code
+    if arr_code:
+        params["txtGoEndCode"] = arr_code
+    return f"{BASE_URL}/ticket/search/list?{urlencode(params)}"
+
+
+def _run_external_firefox_search(
+    *,
+    firefox_executable: str,
+    profile_dir: Path,
+    departure: str,
+    arrival: str,
+    date: str,
+    time_str: str,
+    adults: int,
+    train_types: tuple[str, ...],
+) -> None:
+    profile_dir = profile_dir.expanduser()
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    url = _build_external_firefox_search_url(
+        departure=departure,
+        arrival=arrival,
+        date=date,
+        time_str=time_str,
+        adults=adults,
+        train_types=train_types,
+    )
+    command = [
+        firefox_executable,
+        "--no-remote",
+        "--profile",
+        str(profile_dir),
+        url,
+    ]
+    click.echo(f"[{_now()}] Opening external Firefox search page...")
+    click.echo(f"[{_now()}] Firefox profile: {profile_dir}")
+    click.echo(f"[{_now()}] Search: {departure} → {arrival} {date} {time_str}:00")
+    subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    click.pause(
+        colored(
+            "외부 Firefox에서 Korail 조회/예매를 진행한 뒤, 이 터미널에서 Enter를 누르세요.",
+            "white",
+            "on_blue",
+            attrs=["bold"],
+        )
+    )
+
+
+def _default_extension_chromium_executable() -> Path | None:
+    candidates = [
+        Path.home() / ".cache/ms-playwright/chromium-1105/chrome-linux/chrome",
+    ]
+    playwright_cache = Path.home() / ".cache/ms-playwright"
+    if playwright_cache.is_dir():
+        candidates.extend(
+            sorted(playwright_cache.glob("chromium-*/chrome-linux/chrome"))
+        )
+        candidates.extend(
+            sorted(playwright_cache.glob("chromium-*/chrome-linux64/chrome"))
+        )
+
+    for path in candidates:
+        if path.is_file():
+            return path
+
+    for executable in ("chromium", "chromium-browser"):
+        resolved = shutil.which(executable)
+        if resolved:
+            return Path(resolved)
+    return None
+
+
+def _ensure_extension_login(
+    api: ExtensionKorailAPI,
+    runner: ExtensionBrowserRunner,
+    *,
+    force_relogin: bool = False,
+) -> ExtensionKorailAPI:
+    if (
+        not force_relogin
+        and api.wait_for_login_stable(timeout_s=0.8, interval_s=0.25, stable_checks=1)
+    ):
+        click.echo(f"[{_now()}] Logged in via extension browser profile.")
+        return api
+
+    if not sys.stdin.isatty():
+        raise click.UsageError(
+            "--api-backend=extension requires a TTY for first Korail login"
+        )
+    if force_relogin:
+        click.echo(f"[{_now()}] Force relogin requested for extension backend.")
+    click.echo(f"[{_now()}] Opening Korail login in extension Chromium...")
+    runner.navigate(LOGIN_URL)
+    click.pause(
+        colored(
+            "열린 창에서 Korail 로그인을 완료한 뒤, 이 터미널에서 Enter를 누르세요.\n"
+            "예매 중 작업표시줄의 chromium-browser를 닫지마세요",
+            "white",
+            "on_blue",
+            attrs=["bold"],
+        )
+    )
+    if not api.wait_for_login_stable(timeout_s=10, interval_s=0.5, stable_checks=2):
+        raise click.ClickException("Extension Chromium login was not confirmed.")
+    click.echo(f"[{_now()}] Login successful in extension Chromium profile.")
+    return api
+
+
+def _run_reservation_loop(
+    api: KorailAPI,
+    *,
+    reauthenticate: Callable[[KorailAPI, str], KorailAPI],
+    interactive_mode: bool,
+    departure: str,
+    arrival: str,
+    date: str,
+    time_str: str,
+    adults: int,
+    train_types: tuple[str, ...],
+    seat: str,
+    auto_pay: bool,
+    smart_ticket: bool,
+    telegram: bool,
+    waitlist_alert_phone: str | None,
+    max_attempts: int,
+) -> None:
+    target_trains: list[TrainKey] | None = None
+    target_line: str | None = None
+    clear_each_attempt = sys.stdout.isatty()
+
+    if interactive_mode:
+        while True:
+            try:
+                target_trains = _prompt_target_trains(
+                    api,
+                    departure,
+                    arrival,
+                    date,
+                    time_str,
+                    adults,
+                    train_types,
+                )
+                break
+            except KorailError as exc:
+                code = exc.code or ""
+                if code in _SESSION_EXPIRED_CODES:
+                    click.echo(
+                        f"[{_now()}] Session expired before selection. Re-authenticating..."
+                    )
+                    api = reauthenticate(api, "selection")
+                    continue
+                click.echo(f"[{_now()}] Initial search error: {exc}")
+                sys.exit(1)
+        target_line = _target_summary(target_trains)
+        seat, auto_pay, smart_ticket = _prompt_reservation_options(
+            seat, auto_pay, smart_ticket
+        )
+        if auto_pay and not _ensure_card_for_auto_pay():
+            if click.confirm("자동결제 없이 계속 진행할까요?", default=True):
+                auto_pay = False
+                _save_interactive_default("auto_pay", auto_pay)
+            else:
+                sys.exit(0)
+
+    status_line = (
+        f"KTXgo — {departure} → {arrival}  {date} {time_str}:00  "
+        f"adults={adults} seat={seat} train-types={','.join(train_types)}"
+        f"{' auto-pay' if auto_pay else ''}{' telegram' if telegram else ''}"
+    )
+
+    if not clear_each_attempt:
+        _render_screen(status_line, target_line, clear_screen=False)
+
+    attempt = 0
+    consecutive_errors = 0
+    while max_attempts == 0 or attempt < max_attempts:
+        attempt += 1
+
+        if clear_each_attempt:
+            _render_screen(status_line, target_line, clear_screen=True)
+
+        try:
+            trains = api.search(
+                departure,
+                arrival,
+                date,
+                time_str,
+                adults=adults,
+                train_types=train_types,
+            )
+            consecutive_errors = 0
+        except KorailError as exc:
+            consecutive_errors += 1
+            code = exc.code or ""
+            if code in _SESSION_EXPIRED_CODES:
+                click.echo(f"[{_now()}] Session expired. Re-authenticating...")
+                api = reauthenticate(api, "search")
+                continue
+            click.echo(f"[{_now()}] Search error: {exc}")
+            if code == "MACRO ERROR":
+                sys.exit(1)
+            if consecutive_errors >= 5:
+                click.echo("Too many consecutive errors. Exiting.")
+                sys.exit(1)
+            time.sleep(POLL_INTERVAL_S * 2)
+            continue
+
+        click.echo(f"[{_now()}] Attempt {attempt}  ({departure}→{arrival})")
+        if not trains:
+            click.echo("No trains returned")
+            time.sleep(POLL_INTERVAL_S)
+            continue
+
+        _print_results(trains)
+
+        candidate_trains = trains
+        if target_trains is not None:
+            candidate_trains, missing_count = _resolve_targets(
+                trains, target_trains
+            )
+            if missing_count:
+                click.echo(
+                    f"Selected trains not present now: {missing_count}/{len(target_trains)}"
+                )
+            if not candidate_trains:
+                time.sleep(POLL_INTERVAL_S)
+                continue
+
+        for train in candidate_trains:
+            plan = _reservation_plan(train, seat)
+            if plan is None:
+                continue
+            seat_type, waitlist = plan
+            if waitlist:
+                click.echo(
+                    f"\n[{_now()}] 예약대기 가능: {train.train_no} "
+                    f"({train.dep_time}). 예약대기 신청 ({seat_type})..."
+                )
+            else:
+                click.echo(
+                    f"\n[{_now()}] Seat found: {train.train_no} "
+                    f"({train.dep_time}). Reserving ({seat_type})..."
+                )
+            try:
+                result = api.reserve(
+                    train,
+                    seat_type=seat_type,
+                    adults=adults,
+                    waitlist=waitlist,
+                )
+            except KorailError as exc:
+                code = exc.code or ""
+                if code in _SESSION_EXPIRED_CODES:
+                    click.echo(
+                        f"[{_now()}] Session expired during reserve. Re-authenticating..."
+                    )
+                    api = reauthenticate(api, "reserve")
+                    break  # Restart search loop
+                click.echo(f"  → Reserve failed: {exc}")
+                continue
+
+            if waitlist:
+                _print_success_banner("예약대기 신청완료")
+            else:
+                _print_success_banner("Reservation successful!")
+            for key in ("h_pnr_no", "h_rsv_no", "strResult", "h_msg_txt"):
+                if key in result:
+                    click.echo(f"  {key}: {result[key]}")
+
+            waitlist_alert_status: str | None = None
+            if waitlist:
+                resolved_waitlist_alert_phone = _resolve_waitlist_alert_phone(
+                    waitlist_alert_phone
+                )
+                if resolved_waitlist_alert_phone is None:
+                    waitlist_alert_status = "미등록"
+                    click.echo(
+                        f"[{_now()}] 예약대기 알림 전화번호가 없어 좌석배정 알림 신청을 건너뜁니다."
+                    )
+                else:
+                    try:
+                        api.set_waitlist_alert(
+                            str(result.get("h_pnr_no", "")),
+                            resolved_waitlist_alert_phone,
+                        )
+                        waitlist_alert_status = "등록완료"
+                        click.echo(
+                            f"[{_now()}] 좌석배정 알림 등록완료 ({resolved_waitlist_alert_phone})"
+                        )
+                    except KorailError as exc:
+                        waitlist_alert_status = f"등록실패: {exc}"
+                        click.echo(f"[{_now()}] 좌석배정 알림 등록 실패: {exc}")
+
+            paid = False
+            if auto_pay and not waitlist:
+                paid = _do_pay(api, result, smart_ticket)
+            elif auto_pay and waitlist:
+                click.echo(f"[{_now()}] 예약대기는 자동결제를 지원하지 않습니다.")
+
+            if telegram:
+                _send_telegram(
+                    train,
+                    result,
+                    paid,
+                    waitlist=waitlist,
+                    waitlist_alert_status=waitlist_alert_status,
+                )
+
+            return
+
+        time.sleep(POLL_INTERVAL_S)
+
+
 @click.command()
 @click.option("--departure", default=DEFAULT_DEPARTURE, show_default=True)
 @click.option("--arrival", default=DEFAULT_ARRIVAL, show_default=True)
@@ -1963,16 +2323,22 @@ def _run_external_firefox_login(
     help="Open normal Firefox for manual Korail login, then import its cookies",
 )
 @click.option(
+    "--external-firefox-search",
+    is_flag=True,
+    default=False,
+    help="Open the official Korail search page in normal Firefox and exit",
+)
+@click.option(
     "--external-firefox",
     default="firefox",
     show_default=True,
-    help="Firefox executable for --external-firefox-login",
+    help="Firefox executable for external Firefox modes",
 )
 @click.option(
     "--external-firefox-profile",
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
     default=None,
-    help="Firefox profile directory for --external-firefox-login",
+    help="Firefox profile directory for external Firefox modes",
 )
 @click.option(
     "--pure-login-window",
@@ -1992,6 +2358,25 @@ def _run_external_firefox_login(
     default="default",
     show_default=True,
     help="navigator.webdriver init script mode",
+)
+@click.option(
+    "--api-backend",
+    type=click.Choice(("playwright", "extension")),
+    default="extension",
+    show_default=True,
+    help="Korail API execution backend (extension avoids Korail macro checks)",
+)
+@click.option(
+    "--extension-chromium",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Chromium executable for --api-backend=extension",
+)
+@click.option(
+    "--extension-profile",
+    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Persistent Chromium profile for --api-backend=extension",
 )
 @click.option(
     "--browser",
@@ -2130,8 +2515,12 @@ def main(
     import_cookies_path: Path | None = None,
     check_login_session: bool = False,
     external_firefox_login: bool = False,
+    external_firefox_search: bool = False,
     external_firefox: str = "firefox",
     external_firefox_profile: Path | None = None,
+    api_backend: str = "extension",
+    extension_chromium: Path | None = None,
+    extension_profile: Path | None = None,
 ) -> None:
     configure_keyring_backend()
 
@@ -2145,8 +2534,12 @@ def main(
         raise click.UsageError("--external-firefox-login cannot be used with --pure-login-window")
     if external_firefox_login and import_cookies_path is not None:
         raise click.UsageError("Use only one of --external-firefox-login or --import-cookies")
-    if external_firefox_profile is not None and not external_firefox_login:
-        raise click.UsageError("--external-firefox-profile requires --external-firefox-login")
+    if external_firefox_profile is not None and not (
+        external_firefox_login or external_firefox_search
+    ):
+        raise click.UsageError(
+            "--external-firefox-profile requires an external Firefox mode"
+        )
     if login_debug_dir is not None:
         login_debug_dir.mkdir(parents=True, exist_ok=True)
     viewport = (
@@ -2278,12 +2671,196 @@ def main(
             train_types,
         )
 
+    if external_firefox_search:
+        _run_external_firefox_search(
+            firefox_executable=external_firefox,
+            profile_dir=external_firefox_profile or _default_external_firefox_profile_dir(),
+            departure=departure,
+            arrival=arrival,
+            date=date,
+            time_str=time_str,
+            adults=adults,
+            train_types=train_types,
+        )
+        sys.exit(0)
+
     # Graceful Ctrl+C
     def _sigint(_sig: int, _frame: object) -> None:
         click.echo("\nInterrupted. Exiting.")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _sigint)
+
+    if api_backend == "extension":
+        if pure_login_window:
+            raise click.UsageError("--pure-login-window requires --api-backend=playwright")
+        chromium_executable = extension_chromium or _default_extension_chromium_executable()
+        if chromium_executable is None:
+            raise click.UsageError(
+                "No Chromium executable found for --api-backend=extension. "
+                "Install Chromium or pass --extension-chromium."
+            )
+        initial_url = _build_external_firefox_search_url(
+            departure=departure,
+            arrival=arrival,
+            date=date,
+            time_str=time_str,
+            adults=adults,
+            train_types=train_types,
+        )
+
+        def _make_extension_runner(*, runner_headless: bool) -> ExtensionBrowserRunner:
+            return ExtensionBrowserRunner(
+                chromium_executable=chromium_executable,
+                profile_dir=extension_profile,
+                initial_url=initial_url,
+                headless=runner_headless,
+            )
+
+        def _run_loop_with_extension_api(
+            extension_api: ExtensionKorailAPI,
+            *,
+            reauthenticate: Callable[[KorailAPI, str], KorailAPI],
+        ) -> None:
+            _run_reservation_loop(
+                extension_api,
+                reauthenticate=reauthenticate,
+                interactive_mode=interactive_mode,
+                departure=departure,
+                arrival=arrival,
+                date=date,
+                time_str=time_str,
+                adults=adults,
+                train_types=train_types,
+                seat=seat,
+                auto_pay=auto_pay,
+                smart_ticket=smart_ticket,
+                telegram=telegram,
+                waitlist_alert_phone=waitlist_alert_phone,
+                max_attempts=max_attempts,
+            )
+
+        def _minimize_extension_runner(runner: ExtensionBrowserRunner) -> None:
+            if runner.minimize():
+                click.echo(
+                    f"[{_now()}] Extension Chromium window minimized; "
+                    "reservation loop continues in that logged-in browser."
+                )
+            else:
+                click.echo(
+                    f"[{_now()}] Could not minimize extension Chromium window automatically. "
+                    "You may minimize it manually; do not close it during reservation."
+                )
+
+        def _run_visible_extension_session(
+            *,
+            minimize_after_login: bool,
+            force_login: bool,
+        ) -> None:
+            with _make_extension_runner(runner_headless=False) as visible_runner:
+                visible_api = ExtensionKorailAPI(visible_runner)
+                visible_api = _ensure_extension_login(
+                    visible_api,
+                    visible_runner,
+                    force_relogin=force_login,
+                )
+                if minimize_after_login:
+                    _minimize_extension_runner(visible_runner)
+
+                def _visible_extension_reauthenticate(
+                    current_api: KorailAPI,
+                    _stage: str,
+                ) -> KorailAPI:
+                    del current_api
+                    refreshed_api = _ensure_extension_login(
+                        visible_api,
+                        visible_runner,
+                        force_relogin=True,
+                    )
+                    if minimize_after_login:
+                        _minimize_extension_runner(visible_runner)
+                    return refreshed_api
+
+                _run_loop_with_extension_api(
+                    visible_api,
+                    reauthenticate=_visible_extension_reauthenticate,
+                )
+
+        if headless and force_relogin:
+            _run_visible_extension_session(
+                minimize_after_login=True,
+                force_login=True,
+            )
+            return
+
+        if headless:
+            runner = _make_extension_runner(runner_headless=True)
+            visible_fallback_runner: ExtensionBrowserRunner | None = None
+            runner_closed = False
+            runner.start()
+            try:
+                extension_api = ExtensionKorailAPI(runner)
+                if not extension_api.wait_for_login_stable(
+                    timeout_s=0.8,
+                    interval_s=0.25,
+                    stable_checks=1,
+                ):
+                    click.echo(
+                        f"[{_now()}] Saved extension session is invalid. "
+                        "Opening visible Chromium login..."
+                    )
+                    runner.close()
+                    runner_closed = True
+                    _run_visible_extension_session(
+                        minimize_after_login=True,
+                        force_login=True,
+                    )
+                    return
+                click.echo(f"[{_now()}] Logged in via headless extension Chromium.")
+
+                def _headless_extension_reauthenticate(
+                    current_api: KorailAPI,
+                    _stage: str,
+                ) -> KorailAPI:
+                    nonlocal runner, visible_fallback_runner
+                    del current_api
+                    click.echo(
+                        f"[{_now()}] Headless session expired. "
+                        "Opening visible Chromium login..."
+                    )
+                    runner.close()
+                    runner_closed = True
+                    if visible_fallback_runner is not None:
+                        visible_fallback_runner.close()
+                    visible_fallback_runner = _make_extension_runner(
+                        runner_headless=False
+                    )
+                    visible_fallback_runner.start()
+                    new_api = ExtensionKorailAPI(visible_fallback_runner)
+                    new_api = _ensure_extension_login(
+                        new_api,
+                        visible_fallback_runner,
+                        force_relogin=True,
+                    )
+                    _minimize_extension_runner(visible_fallback_runner)
+                    return new_api
+
+                _run_loop_with_extension_api(
+                    extension_api,
+                    reauthenticate=_headless_extension_reauthenticate,
+                )
+            finally:
+                if not runner_closed:
+                    runner.close()
+                if visible_fallback_runner is not None:
+                    visible_fallback_runner.close()
+            return
+
+        _run_visible_extension_session(
+            minimize_after_login=False,
+            force_login=force_relogin,
+        )
+        return
 
     browser_kwargs: dict[str, object] = {
         "headless": False if pure_login_window else headless,
@@ -2417,6 +2994,8 @@ def main(
                     )
                     continue
                 click.echo(f"[{_now()}] Search error: {exc}")
+                if code == "MACRO ERROR":
+                    sys.exit(1)
                 if consecutive_errors >= 5:
                     click.echo("Too many consecutive errors. Exiting.")
                     sys.exit(1)
