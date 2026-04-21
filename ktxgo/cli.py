@@ -47,7 +47,11 @@ from .cookie_import import (
     import_firefox_korail_cookies,
     import_korail_cookies,
 )
-from .extension_backend import ExtensionBrowserRunner, ExtensionKorailAPI
+from .extension_backend import (
+    ExtensionBrowserRunner,
+    ExtensionKorailAPI,
+    extension_login_cookie_cache_is_fresh,
+)
 from .korail import KorailAPI, KorailError, Train
 
 try:
@@ -74,6 +78,14 @@ _INTERACTIVE_DEFAULT_SERVICE = "KTX"
 _INTERACTIVE_BOOL_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _INTERACTIVE_BOOL_FALSE_VALUES = {"0", "false", "no", "n", "off"}
 _INTERACTIVE_SEAT_CHOICES = {"general", "special", "any", "standing"}
+
+
+def _is_session_expired_error(exc: KorailError) -> bool:
+    code = exc.code or ""
+    if code in _SESSION_EXPIRED_CODES:
+        return True
+    message = str(exc)
+    return "로그인" in message and ("정보가 없습니다" in message or "없" in message)
 
 
 def _fmt_date() -> str:
@@ -2205,13 +2217,22 @@ def _ensure_extension_login(
     while True:
         click.pause(login_prompt)
         click.echo(f"[{_now()}] Checking Korail login...")
-        if api.wait_for_login_stable(timeout_s=20, interval_s=0.5, stable_checks=2):
+        if api.wait_for_login_stable(timeout_s=6, interval_s=0.5, stable_checks=1):
             break
         if not click.confirm(
             "로그인이 아직 확인되지 않았습니다. 로그인 창을 확인한 뒤 다시 확인할까요?",
             default=True,
         ):
             raise click.ClickException("Extension Chromium login was not confirmed.")
+    save_login_cookie_cache = getattr(runner, "save_login_cookie_cache", None)
+    if callable(save_login_cookie_cache):
+        if save_login_cookie_cache():
+            click.echo(f"[{_now()}] Saved extension login cookie cache.")
+        else:
+            click.echo(
+                f"[{_now()}] Could not save extension login cookie cache; "
+                "next run may open visible login again."
+            )
     click.echo(f"[{_now()}] Login successful in extension Chromium profile.")
     return api
 
@@ -2253,7 +2274,7 @@ def _run_reservation_loop(
                 break
             except KorailError as exc:
                 code = exc.code or ""
-                if code in _SESSION_EXPIRED_CODES:
+                if _is_session_expired_error(exc):
                     click.echo(
                         f"[{_now()}] Session expired before selection. Re-authenticating..."
                     )
@@ -2302,7 +2323,7 @@ def _run_reservation_loop(
         except KorailError as exc:
             consecutive_errors += 1
             code = exc.code or ""
-            if code in _SESSION_EXPIRED_CODES:
+            if _is_session_expired_error(exc):
                 click.echo(f"[{_now()}] Session expired. Re-authenticating...")
                 api = reauthenticate(api, "search")
                 continue
@@ -2360,7 +2381,7 @@ def _run_reservation_loop(
                 )
             except KorailError as exc:
                 code = exc.code or ""
-                if code in _SESSION_EXPIRED_CODES:
+                if _is_session_expired_error(exc):
                     click.echo(
                         f"[{_now()}] Session expired during reserve. Re-authenticating..."
                     )
@@ -2944,29 +2965,29 @@ def main(
             return
 
         if headless:
-            runner = _make_extension_runner(runner_headless=True)
+            if not extension_login_cookie_cache_is_fresh():
+                click.echo(
+                    f"[{_now()}] Saved extension login cookie cache is missing or expired. "
+                    "Opening visible Chromium login..."
+                )
+                _run_visible_extension_session(
+                    minimize_after_login=True,
+                    force_login=True,
+                )
+                return
+            runner = _make_extension_runner(
+                runner_headless=True,
+                runner_initial_url=LOGIN_URL,
+            )
             visible_fallback_runner: ExtensionBrowserRunner | None = None
             runner_closed = False
             runner.start()
             try:
                 extension_api = ExtensionKorailAPI(runner)
-                if not extension_api.wait_for_login_stable(
-                    timeout_s=0.8,
-                    interval_s=0.25,
-                    stable_checks=1,
-                ):
-                    click.echo(
-                        f"[{_now()}] Saved extension session is invalid. "
-                        "Opening visible Chromium login..."
-                    )
-                    runner.close()
-                    runner_closed = True
-                    _run_visible_extension_session(
-                        minimize_after_login=True,
-                        force_login=True,
-                    )
-                    return
-                click.echo(f"[{_now()}] Logged in via headless extension Chromium.")
+                click.echo(
+                    f"[{_now()}] Using recent extension login cookie cache "
+                    "with headless Chromium."
+                )
 
                 def _headless_extension_reauthenticate(
                     current_api: KorailAPI,
@@ -3073,7 +3094,7 @@ def main(
                     break
                 except KorailError as exc:
                     code = exc.code or ""
-                    if code in _SESSION_EXPIRED_CODES:
+                    if _is_session_expired_error(exc):
                         click.echo(
                             f"[{_now()}] Session expired before selection. Re-authenticating..."
                         )
@@ -3131,7 +3152,7 @@ def main(
             except KorailError as exc:
                 consecutive_errors += 1
                 code = exc.code or ""
-                if code in _SESSION_EXPIRED_CODES:
+                if _is_session_expired_error(exc):
                     click.echo(f"[{_now()}] Session expired. Re-authenticating...")
                     api = _ensure_login(
                         api,
@@ -3198,7 +3219,7 @@ def main(
                     )
                 except KorailError as exc:
                     code = exc.code or ""
-                    if code in _SESSION_EXPIRED_CODES:
+                    if _is_session_expired_error(exc):
                         click.echo(
                             f"[{_now()}] Session expired during reserve. Re-authenticating..."
                         )
