@@ -10,7 +10,8 @@ from ktxgo.korail import KorailAPI, KorailError, Train
 
 
 class _DummyManager:
-    def __init__(self, headless: bool):
+    def __init__(self, headless: bool, use_saved_session: bool = True, **kwargs):
+        del headless, use_saved_session, kwargs
         self.page = object()
 
     def __enter__(self) -> _DummyManager:
@@ -51,7 +52,11 @@ def _make_waitlist_train() -> Train:
 
 def _patch_cli_runtime(monkeypatch) -> None:
     monkeypatch.setattr(cli, "BrowserManager", _DummyManager)
-    monkeypatch.setattr(cli, "_ensure_login", lambda api, manager, headless: api)
+    monkeypatch.setattr(
+        cli,
+        "_ensure_login",
+        lambda api, manager, headless, **kwargs: api,
+    )
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
     monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
 
@@ -155,6 +160,21 @@ def test_interactive_menu_dispatches_waitlist_alert_setting(monkeypatch) -> None
             time_str="07",
             adults=1,
             headless=True,
+            manual_login_only=False,
+            force_relogin=False,
+            pure_login_window=False,
+            pure_login_stealth=False,
+            webdriver_mode="default",
+            browser_name="firefox",
+            browser_channel=None,
+            browser_executable=None,
+            browser_profile_dir=None,
+            browser_locale="ko-KR",
+            browser_user_agent=None,
+            viewport_size=None,
+            screen_size=None,
+            device_scale_factor=None,
+            login_debug_dir=None,
             interactive=True,
             max_attempts=1,
             train_types=("ktx",),
@@ -561,6 +581,21 @@ def test_main_persists_auto_pay_false_after_card_check_fallback(monkeypatch) -> 
         time_str="07",
         adults=1,
         headless=True,
+        manual_login_only=False,
+        force_relogin=False,
+        pure_login_window=False,
+        pure_login_stealth=False,
+        webdriver_mode="default",
+        browser_name="firefox",
+        browser_channel=None,
+        browser_executable=None,
+        browser_profile_dir=None,
+        browser_locale="ko-KR",
+        browser_user_agent=None,
+        viewport_size=None,
+        screen_size=None,
+        device_scale_factor=None,
+        login_debug_dir=None,
         interactive=True,
         max_attempts=1,
         train_types=("ktx",),
@@ -609,7 +644,12 @@ def test_ensure_login_uses_updated_assisted_login_text(monkeypatch) -> None:
     monkeypatch.setattr(cli, "colored", lambda text, *args, **kwargs: text)
     monkeypatch.setattr(cli.click, "echo", lambda message="": messages.append(str(message)))
 
-    result = cli._ensure_login(DummyAPI(), DummyManager(), headless=False)
+    result = cli._ensure_login(
+        DummyAPI(),
+        DummyManager(),
+        headless=False,
+        use_external_firefox_login=False,
+    )
 
     assert isinstance(result, DummyAPI)
     assert "[로그인 필요] 자동으로 접속된 브라우저에서 로그인 버튼을 직접 눌러주세요" in messages

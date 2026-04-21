@@ -583,7 +583,11 @@ class KorailAPI:
         return data
 
     def login_manual(
-        self, timeout_s: int = 300, *, open_login_page: bool = True
+        self,
+        timeout_s: int = 300,
+        *,
+        open_login_page: bool = True,
+        touch_password_on_comm_error: bool = True,
     ) -> bool:
         """Navigate to login page and wait for user to log in manually.
 
@@ -613,7 +617,7 @@ class KorailAPI:
                 _ = self.page.goto(LOGIN_URL, wait_until="networkidle")
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
-                if comm_error_seen:
+                if comm_error_seen and touch_password_on_comm_error:
                     comm_error_seen = False
                     try:
                         pw_input = self.page.locator("input#password")
@@ -622,6 +626,8 @@ class KorailAPI:
                             self.page.wait_for_timeout(350)
                     except Exception:
                         pass
+                elif comm_error_seen:
+                    comm_error_seen = False
 
                 if self.wait_for_login_stable(
                     timeout_s=0.6,
