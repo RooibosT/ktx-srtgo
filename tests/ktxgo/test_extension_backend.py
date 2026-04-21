@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 import requests
 
 from ktxgo import cli
-from ktxgo.config import API_SCHEDULE
+from ktxgo.config import API_RESERVE, API_SCHEDULE
 from ktxgo.extension_backend import (
     ExtensionBrowserRunner,
     ExtensionControlServer,
     ExtensionKorailAPI,
+    _profile_process_ids,
     write_extension_files,
 )
 from ktxgo.korail import KorailError
@@ -79,7 +83,11 @@ def test_extension_files_inject_page_context_xmlhttprequest(tmp_path) -> None:
     assert "web_accessible_resources" in manifest
     assert "chrome.runtime.getURL(\"page.js\")" in content
     assert "window.postMessage" in content
+    assert "/command?wait=25" in content
+    assert "setInterval(poll, 300)" not in content
     assert "new XMLHttpRequest()" in page
+    assert "xhr.timeout = Number(command.timeoutMs || 30000)" in page
+    assert "xhr.ontimeout" in page
     assert "/classes/com.korail.mobile.seatMovie.ScheduleView" not in page
 
 
@@ -116,6 +124,26 @@ def test_extension_control_server_round_trips_commands() -> None:
         assert posted.status_code == 204
 
         assert server.wait_for_result(command_id, timeout_s=1) == result
+
+
+def test_extension_control_server_long_poll_waits_for_command() -> None:
+    with ExtensionControlServer() as server:
+        responses: list[requests.Response] = []
+
+        thread = threading.Thread(
+            target=lambda: responses.append(
+                requests.get(f"{server.origin}/command?wait=2", timeout=3)
+            )
+        )
+        thread.start()
+        time.sleep(0.1)
+
+        command_id = server.enqueue_command({"action": "api", "endpoint": "/x"})
+        thread.join(timeout=3)
+
+        assert not thread.is_alive()
+        assert responses[0].status_code == 200
+        assert responses[0].json()["id"] == command_id
 
 
 def test_extension_browser_runner_api_call_parses_json(monkeypatch, tmp_path) -> None:
@@ -171,6 +199,166 @@ def test_extension_browser_runner_api_call_parses_json(monkeypatch, tmp_path) ->
         "endpoint": "/endpoint",
         "params": {"a": "b"},
         "method": "POST",
+        "timeoutMs": 30000,
+    }
+
+
+def test_extension_browser_runner_retries_schedule_timeout_once(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class FakeServer:
+        origin = "http://127.0.0.1:12345"
+
+        def __init__(self) -> None:
+            self.commands: list[dict[str, object]] = []
+            self.wait_count = 0
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def enqueue_command(self, command: dict[str, object]) -> str:
+            self.commands.append(command)
+            return str(len(self.commands))
+
+        def wait_for_result(self, command_id: str, *, timeout_s: float) -> dict[str, object]:
+            self.wait_count += 1
+            if self.wait_count == 1:
+                raise TimeoutError("lost extension command")
+            return {
+                "type": "api-result",
+                "id": command_id,
+                "ok": True,
+                "status": 200,
+                "text": '{"strResult":"SUCC","retried":true}',
+            }
+
+    fake_server = FakeServer()
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.ExtensionControlServer",
+        lambda: fake_server,
+    )
+    monkeypatch.setattr("ktxgo.extension_backend.write_extension_files", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.subprocess.Popen",
+        lambda *a, **k: type("DummyProcess", (), {"terminate": lambda self: None})(),
+    )
+
+    runner = ExtensionBrowserRunner(
+        chromium_executable="/bin/chromium",
+        profile_dir=tmp_path / "profile",
+        initial_url="https://www.korail.com/ticket/search/general",
+    )
+    runner.start()
+
+    assert runner.api_call(API_SCHEDULE, {"txtGoStart": "서울"}) == {
+        "strResult": "SUCC",
+        "retried": True,
+    }
+    assert len(fake_server.commands) == 2
+
+
+def test_extension_browser_runner_wraps_non_retryable_timeout(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class FakeServer:
+        origin = "http://127.0.0.1:12345"
+
+        def __init__(self) -> None:
+            self.commands: list[dict[str, object]] = []
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def enqueue_command(self, command: dict[str, object]) -> str:
+            self.commands.append(command)
+            return str(len(self.commands))
+
+        def wait_for_result(self, command_id: str, *, timeout_s: float) -> dict[str, object]:
+            raise TimeoutError("lost extension command")
+
+    fake_server = FakeServer()
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.ExtensionControlServer",
+        lambda: fake_server,
+    )
+    monkeypatch.setattr("ktxgo.extension_backend.write_extension_files", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.subprocess.Popen",
+        lambda *a, **k: type("DummyProcess", (), {"terminate": lambda self: None})(),
+    )
+
+    runner = ExtensionBrowserRunner(
+        chromium_executable="/bin/chromium",
+        profile_dir=tmp_path / "profile",
+        initial_url="https://www.korail.com/ticket/search/general",
+    )
+    runner.start()
+
+    with pytest.raises(KorailError) as exc_info:
+        runner.api_call(API_RESERVE, {"txtJobId": "1101"})
+
+    assert exc_info.value.code == "EXTENSION TIMEOUT"
+    assert len(fake_server.commands) == 1
+
+
+def test_extension_browser_runner_navigate_waits_for_navigation_start(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class FakeServer:
+        origin = "http://127.0.0.1:12345"
+
+        def __init__(self) -> None:
+            self.command: dict[str, object] | None = None
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def enqueue_command(self, command: dict[str, object]) -> str:
+            self.command = command
+            return "11"
+
+        def wait_for_result(self, command_id: str, *, timeout_s: float) -> dict[str, object]:
+            assert command_id == "11"
+            return {
+                "type": "navigation-started",
+                "id": "11",
+                "url": "https://www.korail.com/ticket/login",
+            }
+
+    fake_server = FakeServer()
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.ExtensionControlServer",
+        lambda: fake_server,
+    )
+    monkeypatch.setattr("ktxgo.extension_backend.write_extension_files", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.subprocess.Popen",
+        lambda *a, **k: type("DummyProcess", (), {"terminate": lambda self: None})(),
+    )
+
+    runner = ExtensionBrowserRunner(
+        chromium_executable="/bin/chromium",
+        profile_dir=tmp_path / "profile",
+        initial_url="https://www.korail.com/ticket/search/general",
+    )
+    runner.start()
+
+    assert runner.navigate("https://www.korail.com/ticket/login") is True
+    assert fake_server.command == {
+        "action": "navigate",
+        "url": "https://www.korail.com/ticket/login",
     }
 
 
@@ -214,6 +402,120 @@ def test_extension_browser_runner_can_launch_headless(monkeypatch, tmp_path) -> 
     command = launched["command"]
     assert "--headless=new" in command
     assert "--disable-gpu" in command
+    assert "--disable-background-timer-throttling" in command
+    assert "--disable-renderer-backgrounding" in command
+    assert "--disable-backgrounding-occluded-windows" in command
+    assert "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling" in command
+
+
+def test_extension_browser_runner_visible_launch_is_forced_onscreen(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    launched: dict[str, object] = {}
+
+    class FakeServer:
+        origin = "http://127.0.0.1:12345"
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.ExtensionControlServer",
+        lambda: FakeServer(),
+    )
+    monkeypatch.setattr("ktxgo.extension_backend.write_extension_files", lambda *a, **k: None)
+
+    def fake_popen(command, **kwargs):
+        launched["command"] = command
+        return type("DummyProcess", (), {"terminate": lambda self: None})()
+
+    monkeypatch.setattr("ktxgo.extension_backend.subprocess.Popen", fake_popen)
+
+    runner = ExtensionBrowserRunner(
+        chromium_executable="/bin/chromium",
+        profile_dir=tmp_path / "profile",
+        initial_url="https://www.korail.com/ticket/login",
+        headless=False,
+    )
+    runner.start()
+
+    command = launched["command"]
+    assert "--new-window" in command
+    assert "--start-maximized" in command
+    assert "--window-position=0,0" in command
+
+
+def test_profile_process_ids_detects_matching_user_data_dir(tmp_path) -> None:
+    proc_dir = tmp_path / "proc"
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    matching_pid_dir = proc_dir / "1234"
+    matching_pid_dir.mkdir(parents=True)
+    (matching_pid_dir / "cmdline").write_bytes(
+        b"/usr/bin/chromium\0--user-data-dir="
+        + str(profile_dir).encode()
+        + b"\0"
+    )
+    other_pid_dir = proc_dir / "5678"
+    other_pid_dir.mkdir()
+    (other_pid_dir / "cmdline").write_bytes(
+        b"/usr/bin/chromium\0--user-data-dir=/tmp/other\0"
+    )
+
+    assert _profile_process_ids(profile_dir, proc_dir=proc_dir) == [1234]
+
+
+def test_extension_browser_runner_terminates_existing_profile_processes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    terminated: list[int] = []
+    cleanup_grace: list[float] = []
+
+    class FakeServer:
+        origin = "http://127.0.0.1:12345"
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.ExtensionControlServer",
+        lambda: FakeServer(),
+    )
+    monkeypatch.setattr("ktxgo.extension_backend.write_extension_files", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "ktxgo.extension_backend._profile_process_ids",
+        lambda profile_dir: [1234],
+    )
+    monkeypatch.setattr(
+        "ktxgo.extension_backend._terminate_processes",
+        lambda process_ids, *, grace_s=2.0: (
+            terminated.extend(process_ids),
+            cleanup_grace.append(grace_s),
+        ),
+    )
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.subprocess.Popen",
+        lambda *a, **k: type("DummyProcess", (), {"terminate": lambda self: None})(),
+    )
+
+    runner = ExtensionBrowserRunner(
+        chromium_executable="/bin/chromium",
+        profile_dir=tmp_path / "profile",
+        initial_url="https://www.korail.com/ticket/login",
+        headless=False,
+    )
+    runner.start()
+
+    assert terminated == [1234]
+    assert cleanup_grace and cleanup_grace[0] <= 0.5
 
 
 def test_extension_browser_runner_can_request_window_minimize(monkeypatch, tmp_path) -> None:

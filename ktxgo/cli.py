@@ -8,15 +8,17 @@ import subprocess
 import sys
 import time
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Iterator, cast
 from urllib.parse import urlencode
 
 import click
 import inquirer
 import keyring
 from click.core import ParameterSource
+from inquirer.render.console import ConsoleRender
 from termcolor import colored
 
 from srtgo.keyring_bootstrap import configure_keyring_backend
@@ -398,6 +400,14 @@ def _fit_display(text: str, width: int) -> str:
     return "".join(out)
 
 
+def _ellipsize_display(text: str, width: int) -> str:
+    if _display_width(text) <= width:
+        return text
+    if width <= 1:
+        return _fit_display(text, width)
+    return _fit_display(text, width - 1) + "…"
+
+
 def _pad_display(text: str, width: int, *, align: str = "left") -> str:
     trimmed = _fit_display(text, width)
     pad = max(0, width - _display_width(trimmed))
@@ -410,6 +420,111 @@ def _format_row(columns: list[tuple[str, int, str]]) -> str:
     return " ".join(
         _pad_display(text, width, align=align) for text, width, align in columns
     )
+
+
+class _KTXConsoleRender(ConsoleRender):
+    """Console renderer that behaves better in small terminals.
+
+    ``python-inquirer`` 3.4.1 has two rough edges that affect arrow-key prompts:
+    it uses terminal width as the height for the bottom status bar, and it prints
+    option labels without truncation.  In a short or narrow terminal this can
+    scroll/wrap the prompt, so the next ↑/↓ redraw moves to the wrong row.
+    """
+
+    @property
+    def height(self) -> int:
+        terminal_height = getattr(self.terminal, "height", None)
+        if terminal_height:
+            return int(terminal_height)
+        return shutil.get_terminal_size(fallback=(80, 24)).lines
+
+    @property
+    def width(self) -> int:
+        terminal_width = getattr(self.terminal, "width", None)
+        if terminal_width:
+            return int(terminal_width)
+        return shutil.get_terminal_size(fallback=(80, 24)).columns
+
+    def _print_header(self, render: object) -> None:
+        base = str(render.get_header())  # type: ignore[attr-defined]
+        header = _ellipsize_display(base, max(1, self.width - 9))
+        default_value = " ({color}{default}{normal})".format(
+            default=render.question.default,  # type: ignore[attr-defined]
+            color=self._theme.Question.default_color,
+            normal=self.terminal.normal,
+        )
+        show_default = bool(
+            render.question.default  # type: ignore[attr-defined]
+            and render.show_default  # type: ignore[attr-defined]
+        )
+        header += default_value if show_default else ""
+        msg_template = (
+            "{t.move_up}{t.clear_eol}{tq.brackets_color}["
+            "{tq.mark_color}?{tq.brackets_color}]{t.normal} {msg}"
+        )
+
+        current_value = str(render.get_current_value()).replace("{", "{{").replace(  # type: ignore[attr-defined]
+            "}", "}}"
+        )
+        self.print_str(
+            f"\n{msg_template}: {current_value}",
+            msg=header,
+            lf=not render.title_inline,  # type: ignore[attr-defined]
+            tq=self._theme.Question,
+        )
+
+    def _print_options(self, render: object) -> None:
+        for message, symbol, color in render.get_options():  # type: ignore[attr-defined]
+            if hasattr(message, "decode"):
+                message = message.decode("utf-8")
+            symbol_text = str(symbol)
+            prefix_width = _display_width(f" {symbol_text} ")
+            max_message_width = max(1, self.width - prefix_width - 1)
+            fitted_message = _ellipsize_display(str(message), max_message_width)
+            self.print_line(
+                " {color}{s} {m}{t.normal}",
+                m=fitted_message,
+                color=color,
+                s=symbol,
+            )
+
+
+def _prompt_visible_option_count() -> int:
+    lines = shutil.get_terminal_size(fallback=(80, 24)).lines
+    # Header/current-value/status bar + a small safety margin.  Keeping the
+    # rendered prompt inside the viewport avoids scrollback-driven redraw bugs.
+    count = max(3, min(13, lines - 5))
+    if count % 2 == 0:
+        count -= 1
+    return max(3, count)
+
+
+@contextmanager
+def _inquirer_prompt_render_context() -> Iterator[_KTXConsoleRender]:
+    import inquirer.render.console._checkbox as checkbox_render
+    import inquirer.render.console._list as list_render
+
+    option_count = _prompt_visible_option_count()
+    half_option_count = (option_count - 1) // 2
+    original_values = (
+        list_render.MAX_OPTIONS_DISPLAYED_AT_ONCE,
+        list_render.half_options,
+        checkbox_render.MAX_OPTIONS_DISPLAYED_AT_ONCE,
+        checkbox_render.half_options,
+    )
+    list_render.MAX_OPTIONS_DISPLAYED_AT_ONCE = option_count
+    list_render.half_options = half_option_count
+    checkbox_render.MAX_OPTIONS_DISPLAYED_AT_ONCE = option_count
+    checkbox_render.half_options = half_option_count
+    try:
+        yield _KTXConsoleRender()
+    finally:
+        (
+            list_render.MAX_OPTIONS_DISPLAYED_AT_ONCE,
+            list_render.half_options,
+            checkbox_render.MAX_OPTIONS_DISPLAYED_AT_ONCE,
+            checkbox_render.half_options,
+        ) = original_values
 
 
 def _flush_tty_input_buffer() -> None:
@@ -443,7 +558,13 @@ def _list_input_guarded(
 ) -> object:
     _prepare_tty_prompt()
     try:
-        return inquirer.list_input(message=message, choices=choices, **kwargs)
+        with _inquirer_prompt_render_context() as render:
+            return inquirer.list_input(
+                message=message,
+                choices=choices,
+                render=render,
+                **kwargs,
+            )
     finally:
         _finish_tty_prompt()
 
@@ -451,7 +572,8 @@ def _list_input_guarded(
 def _prompt_guarded(questions: list[object]) -> dict[str, object] | None:
     _prepare_tty_prompt()
     try:
-        return inquirer.prompt(questions)
+        with _inquirer_prompt_render_context() as render:
+            return inquirer.prompt(questions, render=render)
     finally:
         _finish_tty_prompt()
 
@@ -2043,8 +2165,16 @@ def _ensure_extension_login(
     *,
     force_relogin: bool = False,
 ) -> ExtensionKorailAPI:
+    runner_initial_url = str(getattr(runner, "initial_url", ""))
+    prompt_first = (
+        not force_relogin
+        and runner_initial_url == LOGIN_URL
+        and not bool(getattr(runner, "headless", False))
+        and sys.stdin.isatty()
+    )
     if (
         not force_relogin
+        and not prompt_first
         and api.wait_for_login_stable(timeout_s=0.8, interval_s=0.25, stable_checks=1)
     ):
         click.echo(f"[{_now()}] Logged in via extension browser profile.")
@@ -2057,18 +2187,31 @@ def _ensure_extension_login(
     if force_relogin:
         click.echo(f"[{_now()}] Force relogin requested for extension backend.")
     click.echo(f"[{_now()}] Opening Korail login in extension Chromium...")
-    runner.navigate(LOGIN_URL)
-    click.pause(
-        colored(
-            "열린 창에서 Korail 로그인을 완료한 뒤, 이 터미널에서 Enter를 누르세요.\n"
-            "예매 중 작업표시줄의 chromium-browser를 닫지마세요",
-            "white",
-            "on_blue",
-            attrs=["bold"],
-        )
+    if runner_initial_url != LOGIN_URL:
+        navigation_result = runner.navigate(LOGIN_URL)
+        if navigation_result is False:
+            click.echo(
+                f"[{_now()}] Login page navigation was not confirmed yet. "
+                "If the login window is not visible, click the Chromium window and wait a few seconds."
+            )
+
+    login_prompt = colored(
+        "열린 창에서 Korail 로그인을 완료한 뒤, 이 터미널에서 Enter를 누르세요.\n"
+        "예매 중 작업표시줄의 chromium-browser를 닫지마세요",
+        "white",
+        "on_blue",
+        attrs=["bold"],
     )
-    if not api.wait_for_login_stable(timeout_s=10, interval_s=0.5, stable_checks=2):
-        raise click.ClickException("Extension Chromium login was not confirmed.")
+    while True:
+        click.pause(login_prompt)
+        click.echo(f"[{_now()}] Checking Korail login...")
+        if api.wait_for_login_stable(timeout_s=20, interval_s=0.5, stable_checks=2):
+            break
+        if not click.confirm(
+            "로그인이 아직 확인되지 않았습니다. 로그인 창을 확인한 뒤 다시 확인할까요?",
+            default=True,
+        ):
+            raise click.ClickException("Extension Chromium login was not confirmed.")
     click.echo(f"[{_now()}] Login successful in extension Chromium profile.")
     return api
 
@@ -2709,11 +2852,15 @@ def main(
             train_types=train_types,
         )
 
-        def _make_extension_runner(*, runner_headless: bool) -> ExtensionBrowserRunner:
+        def _make_extension_runner(
+            *,
+            runner_headless: bool,
+            runner_initial_url: str | None = None,
+        ) -> ExtensionBrowserRunner:
             return ExtensionBrowserRunner(
                 chromium_executable=chromium_executable,
                 profile_dir=extension_profile,
-                initial_url=initial_url,
+                initial_url=runner_initial_url or initial_url,
                 headless=runner_headless,
             )
 
@@ -2757,7 +2904,10 @@ def main(
             minimize_after_login: bool,
             force_login: bool,
         ) -> None:
-            with _make_extension_runner(runner_headless=False) as visible_runner:
+            with _make_extension_runner(
+                runner_headless=False,
+                runner_initial_url=LOGIN_URL,
+            ) as visible_runner:
                 visible_api = ExtensionKorailAPI(visible_runner)
                 visible_api = _ensure_extension_login(
                     visible_api,
@@ -2822,7 +2972,7 @@ def main(
                     current_api: KorailAPI,
                     _stage: str,
                 ) -> KorailAPI:
-                    nonlocal runner, visible_fallback_runner
+                    nonlocal runner, runner_closed, visible_fallback_runner
                     del current_api
                     click.echo(
                         f"[{_now()}] Headless session expired. "
@@ -2833,7 +2983,8 @@ def main(
                     if visible_fallback_runner is not None:
                         visible_fallback_runner.close()
                     visible_fallback_runner = _make_extension_runner(
-                        runner_headless=False
+                        runner_headless=False,
+                        runner_initial_url=LOGIN_URL,
                     )
                     visible_fallback_runner.start()
                     new_api = ExtensionKorailAPI(visible_fallback_runner)

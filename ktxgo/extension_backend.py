@@ -1,16 +1,97 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
+import signal
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Protocol, cast
+from urllib.parse import parse_qs, urlparse
 
-from .config import DATA_DIR, SEARCH_URL
+from .config import API_LOGIN_CHECK, API_SCHEDULE, DATA_DIR, SEARCH_URL
 from .korail import KorailAPI, KorailError
+
+
+def _profile_process_ids(profile_dir: Path, *, proc_dir: Path = Path("/proc")) -> list[int]:
+    """Return Linux process IDs currently using the Chromium profile directory."""
+    if not proc_dir.is_dir():
+        return []
+
+    try:
+        target_profile = profile_dir.resolve()
+    except OSError:
+        target_profile = profile_dir.absolute()
+
+    process_ids: list[int] = []
+    current_pid = os.getpid()
+    for pid_dir in proc_dir.iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        pid = int(pid_dir.name)
+        if pid == current_pid:
+            continue
+        try:
+            raw = (pid_dir / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        args = [part.decode("utf-8", "ignore") for part in raw.split(b"\0") if part]
+        for index, arg in enumerate(args):
+            user_data_dir = ""
+            if arg.startswith("--user-data-dir="):
+                user_data_dir = arg.split("=", 1)[1]
+            elif arg == "--user-data-dir" and index + 1 < len(args):
+                user_data_dir = args[index + 1]
+            if not user_data_dir:
+                continue
+            try:
+                candidate_profile = Path(user_data_dir).resolve()
+            except OSError:
+                candidate_profile = Path(user_data_dir).absolute()
+            if candidate_profile == target_profile:
+                process_ids.append(pid)
+                break
+    return sorted(process_ids)
+
+
+def _terminate_processes(process_ids: list[int], *, grace_s: float = 2.0) -> None:
+    """Terminate stale Chromium processes for a dedicated ktxgo profile."""
+    if not process_ids:
+        return
+
+    current_pid = os.getpid()
+    targets = [pid for pid in process_ids if pid != current_pid]
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            continue
+
+    deadline = time.monotonic() + max(0.0, grace_s)
+    remaining = set(targets)
+    while remaining and time.monotonic() < deadline:
+        for pid in list(remaining):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                remaining.discard(pid)
+            except OSError:
+                remaining.discard(pid)
+        if remaining:
+            time.sleep(0.05)
+
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 class ExtensionRunner(Protocol):
@@ -53,14 +134,26 @@ class ExtensionControlServer:
                 self.end_headers()
 
             def do_GET(self) -> None:
-                if self.path != "/command":
+                parsed_url = urlparse(self.path)
+                if parsed_url.path != "/command":
                     self.send_response(404)
                     self._send_cors()
                     self.end_headers()
                     return
 
+                wait_s = 0.0
+                wait_values = parse_qs(parsed_url.query).get("wait", [])
+                if wait_values:
+                    try:
+                        wait_s = max(0.0, min(30.0, float(wait_values[0])))
+                    except ValueError:
+                        wait_s = 0.0
+
                 try:
-                    command = owner._commands.get_nowait()
+                    if wait_s > 0:
+                        command = owner._commands.get(timeout=wait_s)
+                    else:
+                        command = owner._commands.get_nowait()
                 except queue.Empty:
                     self.send_response(204)
                     self._send_cors()
@@ -190,28 +283,39 @@ def write_extension_files(extension_dir: Path, *, control_origin: str) -> None:
     report(event.data.payload);
   }});
 
+  const handleCommand = (command) => {{
+    if (command.action === "minimize") {{
+      chrome.runtime.sendMessage({{type: "KTXGO_MINIMIZE", id: command.id}}, (reply) => {{
+        const runtimeError = chrome.runtime.lastError;
+        report({{
+          type: "minimize-result",
+          id: command.id,
+          ok: !runtimeError && !!reply && reply.ok === true,
+          error: runtimeError ? runtimeError.message : ((reply && reply.error) || ""),
+        }});
+      }});
+      return;
+    }}
+    window.postMessage({{type: "KTXGO_COMMAND", command}}, "*");
+  }};
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
   const poll = async () => {{
+    while (true) {{
     try {{
-      const response = await fetch(`${{CONTROL_ORIGIN}}/command`, {{
+      const response = await fetch(`${{CONTROL_ORIGIN}}/command?wait=25`, {{
         cache: "no-store",
       }});
-      if (response.status === 204) return;
-      const command = await response.json();
-      if (command.action === "minimize") {{
-        chrome.runtime.sendMessage({{type: "KTXGO_MINIMIZE", id: command.id}}, (reply) => {{
-          const runtimeError = chrome.runtime.lastError;
-          report({{
-            type: "minimize-result",
-            id: command.id,
-            ok: !runtimeError && !!reply && reply.ok === true,
-            error: runtimeError ? runtimeError.message : ((reply && reply.error) || ""),
-          }});
-        }});
-        return;
+      if (response.status === 200) {{
+        handleCommand(await response.json());
+      }} else if (response.status !== 204) {{
+        await sleep(1000);
       }}
-      window.postMessage({{type: "KTXGO_COMMAND", command}}, "*");
     }} catch (_) {{
       // The Python control server may not be ready during browser startup.
+      await sleep(1000);
+    }}
     }}
   }};
 
@@ -226,7 +330,7 @@ def write_extension_files(extension_dir: Path, *, control_origin: str) -> None:
     userAgent: navigator.userAgent,
     webdriver: navigator.webdriver,
   }});
-  setInterval(poll, 300);
+  poll();
 }})();
 """.lstrip()
     )
@@ -269,6 +373,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const xhr = new XMLHttpRequest();
     xhr.open(command.method || "POST", command.endpoint, true);
     xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+    xhr.timeout = Number(command.timeoutMs || 30000);
     xhr.onreadystatechange = () => {
       if (xhr.readyState !== 4) return;
       send({
@@ -289,6 +394,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         responseURL: xhr.responseURL || "",
         text: "",
         error: "xhr_error",
+      });
+    };
+    xhr.ontimeout = () => {
+      send({
+        type: "api-result",
+        id: command.id,
+        ok: false,
+        status: xhr.status || 0,
+        responseURL: xhr.responseURL || "",
+        text: "",
+        error: "xhr_timeout",
       });
     };
     xhr.send(encodeForm(command.params || {}));
@@ -370,6 +486,10 @@ class ExtensionBrowserRunner:
         self.server: ExtensionControlServer | None = None
         self.process: subprocess.Popen[object] | None = None
 
+    @staticmethod
+    def _is_retryable_endpoint(endpoint: str) -> bool:
+        return endpoint in {API_LOGIN_CHECK, API_SCHEDULE}
+
     def __enter__(self) -> ExtensionBrowserRunner:
         self.start()
         return self
@@ -382,6 +502,7 @@ class ExtensionBrowserRunner:
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        _terminate_processes(_profile_process_ids(self.profile_dir), grace_s=0.35)
         self.server = ExtensionControlServer()
         self.server.start()
         write_extension_files(self.extension_dir, control_origin=self.server.origin)
@@ -390,6 +511,10 @@ class ExtensionBrowserRunner:
             f"--user-data-dir={self.profile_dir}",
             "--no-first-run",
             "--no-sandbox",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
             f"--disable-extensions-except={self.extension_dir}",
             f"--load-extension={self.extension_dir}",
         ]
@@ -398,6 +523,15 @@ class ExtensionBrowserRunner:
                 [
                     "--headless=new",
                     "--disable-gpu",
+                    "--window-size=1280,900",
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "--new-window",
+                    "--start-maximized",
+                    "--window-position=0,0",
                     "--window-size=1280,900",
                 ]
             )
@@ -431,23 +565,48 @@ class ExtensionBrowserRunner:
     def api_call(self, endpoint: str, params: dict[str, str]) -> dict[str, object]:
         if self.server is None:
             raise RuntimeError("Extension browser runner is not started")
-        command_id = self.server.enqueue_command(
-            {
-                "action": "api",
-                "endpoint": endpoint,
-                "params": params,
-                "method": "POST",
-            }
-        )
-        result = self.server.wait_for_result(
-            command_id,
-            timeout_s=self.command_timeout_s,
-        )
-        if not bool(result.get("ok", False)):
-            raise KorailError(
-                str(result.get("error") or "Extension browser API call failed"),
-                str(result.get("status") or ""),
+
+        attempts = 2 if self._is_retryable_endpoint(endpoint) else 1
+        last_timeout: TimeoutError | None = None
+        for attempt_idx in range(attempts):
+            command_id = self.server.enqueue_command(
+                {
+                    "action": "api",
+                    "endpoint": endpoint,
+                    "params": params,
+                    "method": "POST",
+                    "timeoutMs": int(self.command_timeout_s * 1000),
+                }
             )
+            try:
+                result = self.server.wait_for_result(
+                    command_id,
+                    timeout_s=self.command_timeout_s + 2,
+                )
+            except TimeoutError as exc:
+                last_timeout = exc
+                if attempt_idx + 1 < attempts:
+                    continue
+                raise KorailError(
+                    f"Extension browser timed out waiting for {endpoint}",
+                    "EXTENSION TIMEOUT",
+                ) from exc
+
+            if not bool(result.get("ok", False)):
+                error = str(result.get("error") or "Extension browser API call failed")
+                if error == "xhr_timeout" and attempt_idx + 1 < attempts:
+                    continue
+                code = "EXTENSION TIMEOUT" if error == "xhr_timeout" else str(
+                    result.get("status") or ""
+                )
+                raise KorailError(error, code)
+            break
+        else:  # pragma: no cover - defensive; loop either breaks or raises.
+            raise KorailError(
+                f"Extension browser timed out waiting for {endpoint}",
+                "EXTENSION TIMEOUT",
+            ) from last_timeout
+
         text = str(result.get("text") or "").strip()
         if not text:
             raise KorailError(f"Empty response from {endpoint}")
@@ -459,10 +618,18 @@ class ExtensionBrowserRunner:
             raise KorailError(f"Unexpected JSON payload from {endpoint}")
         return cast(dict[str, object], data)
 
-    def navigate(self, url: str) -> None:
+    def navigate(self, url: str) -> bool:
         if self.server is None:
             raise RuntimeError("Extension browser runner is not started")
-        self.server.enqueue_command({"action": "navigate", "url": url})
+        command_id = self.server.enqueue_command({"action": "navigate", "url": url})
+        try:
+            result = self.server.wait_for_result(
+                command_id,
+                timeout_s=min(10.0, self.command_timeout_s),
+            )
+        except Exception:
+            return False
+        return str(result.get("type", "")) == "navigation-started"
 
     def minimize(self) -> bool:
         if self.server is None:

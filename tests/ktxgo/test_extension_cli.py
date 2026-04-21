@@ -36,6 +36,97 @@ def test_extension_login_prompt_warns_not_to_close_chromium(monkeypatch) -> None
     assert "예매 중 작업표시줄의 chromium-browser를 닫지마세요" in messages[0]
 
 
+def test_extension_login_confirmation_can_retry(monkeypatch) -> None:
+    messages: list[str] = []
+    confirms: list[str] = []
+
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.wait_count = 0
+
+        def wait_for_login_stable(self, **kwargs):
+            self.wait_count += 1
+            return self.wait_count >= 3
+
+    class DummyRunner:
+        def navigate(self, url: str) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        type("DummyStdin", (), {"isatty": lambda self: True})(),
+    )
+    monkeypatch.setattr(cli.click, "pause", lambda message="": messages.append(message))
+    monkeypatch.setattr(
+        cli.click,
+        "confirm",
+        lambda message, default=True: confirms.append(message) or True,
+    )
+
+    cli._ensure_extension_login(DummyAPI(), DummyRunner(), force_relogin=False)
+
+    assert len(messages) == 2
+    assert len(confirms) == 1
+    assert "로그인이 아직 확인되지 않았습니다" in confirms[0]
+
+
+def test_extension_login_does_not_requeue_navigation_when_started_on_login_url(
+    monkeypatch,
+) -> None:
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.wait_count = 0
+
+        def wait_for_login_stable(self, **kwargs):
+            self.wait_count += 1
+            return self.wait_count >= 1
+
+    class DummyRunner:
+        initial_url = cli.LOGIN_URL
+
+        def navigate(self, url: str) -> bool:
+            raise AssertionError("login runner already started on login URL")
+
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        type("DummyStdin", (), {"isatty": lambda self: True})(),
+    )
+    monkeypatch.setattr(cli.click, "pause", lambda message="": None)
+
+    cli._ensure_extension_login(DummyAPI(), DummyRunner(), force_relogin=True)
+
+
+def test_extension_login_prompts_before_probe_when_started_on_login_url(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+
+    class DummyAPI:
+        def wait_for_login_stable(self, **kwargs):
+            events.append("wait")
+            return True
+
+    class DummyRunner:
+        initial_url = cli.LOGIN_URL
+        headless = False
+
+        def navigate(self, url: str) -> bool:
+            raise AssertionError("login runner already started on login URL")
+
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        type("DummyStdin", (), {"isatty": lambda self: True})(),
+    )
+    monkeypatch.setattr(cli.click, "pause", lambda message="": events.append("pause"))
+
+    cli._ensure_extension_login(DummyAPI(), DummyRunner(), force_relogin=False)
+
+    assert events == ["pause", "wait"]
+
+
 def test_cli_extension_backend_uses_extension_runner(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -109,10 +200,80 @@ def test_cli_extension_backend_uses_extension_runner(monkeypatch) -> None:
     assert captured["search_args"] == ("서울", "부산", "20260422", "06")
 
 
+def test_cli_visible_extension_starts_on_login_url(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FailManager:
+        def __init__(self, **kwargs):
+            raise AssertionError("extension backend must not start Playwright")
+
+    class DummyRunner:
+        def __init__(self, **kwargs):
+            captured["runner_kwargs"] = kwargs
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            self.start()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+    class DummyAPI:
+        def __init__(self, runner):
+            self.runner = runner
+
+        def wait_for_login_stable(self, **kwargs):
+            return True
+
+        def search(self, *args, **kwargs):
+            return []
+
+    monkeypatch.setattr(cli, "configure_keyring_backend", lambda: None)
+    monkeypatch.setattr(cli, "BrowserManager", FailManager)
+    monkeypatch.setattr(cli, "ExtensionBrowserRunner", DummyRunner)
+    monkeypatch.setattr(cli, "ExtensionKorailAPI", DummyAPI)
+    monkeypatch.setattr(
+        cli,
+        "_default_extension_chromium_executable",
+        lambda: Path("/tmp/chromium-123"),
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "--no-headless",
+            "--no-interactive",
+            "--departure",
+            "서울",
+            "--arrival",
+            "부산",
+            "--date",
+            "20260422",
+            "--time",
+            "06",
+            "--max-attempts",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["runner_kwargs"]["headless"] is False
+    assert captured["runner_kwargs"]["initial_url"] == cli.LOGIN_URL
+
+
 def test_cli_headless_extension_falls_back_to_minimized_visible_login(
     monkeypatch,
 ) -> None:
     events: list[str] = []
+    runner_initial_urls: list[str] = []
 
     class FailManager:
         def __init__(self, **kwargs):
@@ -121,6 +282,7 @@ def test_cli_headless_extension_falls_back_to_minimized_visible_login(
     class DummyRunner:
         def __init__(self, **kwargs):
             self.headless = bool(kwargs["headless"])
+            runner_initial_urls.append(str(kwargs["initial_url"]))
             events.append(f"runner:init:{self.headless}")
 
         def start(self):
@@ -205,3 +367,4 @@ def test_cli_headless_extension_falls_back_to_minimized_visible_login(
         "search:False",
         "runner:close:False",
     ]
+    assert runner_initial_urls[1] == cli.LOGIN_URL
