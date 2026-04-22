@@ -50,7 +50,7 @@ from .cookie_import import (
 from .extension_backend import (
     ExtensionBrowserRunner,
     ExtensionKorailAPI,
-    extension_login_cookie_cache_is_fresh,
+    extension_login_cookie_cache_available,
 )
 from .korail import KorailAPI, KorailError, Train
 
@@ -2178,17 +2178,14 @@ def _ensure_extension_login(
     force_relogin: bool = False,
 ) -> ExtensionKorailAPI:
     runner_initial_url = str(getattr(runner, "initial_url", ""))
-    prompt_first = (
-        not force_relogin
-        and runner_initial_url == LOGIN_URL
-        and not bool(getattr(runner, "headless", False))
-        and sys.stdin.isatty()
-    )
-    if (
-        not force_relogin
-        and not prompt_first
-        and api.wait_for_login_stable(timeout_s=0.8, interval_s=0.25, stable_checks=1)
+    if not force_relogin and api.wait_for_login_stable(
+        timeout_s=0.8,
+        interval_s=0.25,
+        stable_checks=1,
     ):
+        save_login_cookie_cache = getattr(runner, "save_login_cookie_cache", None)
+        if callable(save_login_cookie_cache):
+            save_login_cookie_cache()
         click.echo(f"[{_now()}] Logged in via extension browser profile.")
         return api
 
@@ -2920,6 +2917,18 @@ def main(
                     "You may minimize it manually; do not close it during reservation."
                 )
 
+        def _run_visible_extension_login(*, force_login: bool) -> None:
+            with _make_extension_runner(
+                runner_headless=False,
+                runner_initial_url=LOGIN_URL,
+            ) as visible_runner:
+                visible_api = ExtensionKorailAPI(visible_runner)
+                _ensure_extension_login(
+                    visible_api,
+                    visible_runner,
+                    force_relogin=force_login,
+                )
+
         def _run_visible_extension_session(
             *,
             minimize_after_login: bool,
@@ -2957,24 +2966,13 @@ def main(
                     reauthenticate=_visible_extension_reauthenticate,
                 )
 
-        if headless and force_relogin:
-            _run_visible_extension_session(
-                minimize_after_login=True,
-                force_login=True,
-            )
-            return
-
-        if headless:
-            if not extension_login_cookie_cache_is_fresh():
-                click.echo(
-                    f"[{_now()}] Saved extension login cookie cache is missing or expired. "
-                    "Opening visible Chromium login..."
-                )
-                _run_visible_extension_session(
-                    minimize_after_login=True,
-                    force_login=True,
-                )
-                return
+        def _run_headless_extension_session(
+            *,
+            login_probe_timeout_s: float | None,
+            cache_hint: bool = False,
+            success_message: str | None = None,
+            success_elapsed_started_at: float | None = None,
+        ) -> bool:
             runner = _make_extension_runner(
                 runner_headless=True,
                 runner_initial_url=LOGIN_URL,
@@ -2984,10 +2982,32 @@ def main(
             runner.start()
             try:
                 extension_api = ExtensionKorailAPI(runner)
-                click.echo(
-                    f"[{_now()}] Using recent extension login cookie cache "
-                    "with headless Chromium."
-                )
+                if cache_hint:
+                    click.echo(
+                        f"[{_now()}] Using extension login cookie cache "
+                        "with headless Chromium."
+                    )
+                if login_probe_timeout_s is not None:
+                    if not extension_api.wait_for_login_stable(
+                        timeout_s=login_probe_timeout_s,
+                        interval_s=0.5,
+                        stable_checks=1,
+                    ):
+                        return False
+                    save_login_cookie_cache = getattr(
+                        runner,
+                        "save_login_cookie_cache",
+                        None,
+                    )
+                    if callable(save_login_cookie_cache):
+                        save_login_cookie_cache()
+                    if success_message is not None:
+                        if success_elapsed_started_at is not None:
+                            elapsed_s = time.monotonic() - success_elapsed_started_at
+                            success_message = success_message.format(
+                                elapsed_s=elapsed_s
+                            )
+                        click.echo(f"[{_now()}] {success_message}")
 
                 def _headless_extension_reauthenticate(
                     current_api: KorailAPI,
@@ -3021,11 +3041,59 @@ def main(
                     extension_api,
                     reauthenticate=_headless_extension_reauthenticate,
                 )
+                return True
             finally:
                 if not runner_closed:
                     runner.close()
                 if visible_fallback_runner is not None:
                     visible_fallback_runner.close()
+
+        def _run_visible_login_then_headless_or_visible(*, force_login: bool) -> None:
+            _run_visible_extension_login(force_login=force_login)
+            click.echo(
+                f"[{_now()}] Switching logged-in Chromium profile to headless..."
+            )
+            handoff_started_at = time.monotonic()
+            if _run_headless_extension_session(
+                login_probe_timeout_s=10.0,
+                success_message="Headless handoff confirmed in {elapsed_s:.1f}s.",
+                success_elapsed_started_at=handoff_started_at,
+            ):
+                return
+            elapsed_s = time.monotonic() - handoff_started_at
+            click.echo(
+                f"[{_now()}] Headless handoff was not confirmed in {elapsed_s:.1f}s. "
+                "Keeping visible Chromium session."
+            )
+            _run_visible_extension_session(
+                minimize_after_login=True,
+                force_login=False,
+            )
+
+        if headless and force_relogin:
+            _run_visible_login_then_headless_or_visible(force_login=True)
+            return
+
+        if headless:
+            if extension_login_cookie_cache_available():
+                _run_headless_extension_session(
+                    login_probe_timeout_s=None,
+                    cache_hint=True,
+                )
+                return
+
+            click.echo(f"[{_now()}] Checking saved extension Chromium profile...")
+            if _run_headless_extension_session(
+                login_probe_timeout_s=6,
+                success_message="Logged in via saved extension Chromium profile.",
+            ):
+                return
+
+            click.echo(
+                f"[{_now()}] Saved extension Chromium profile is not logged in. "
+                "Opening visible Chromium login..."
+            )
+            _run_visible_login_then_headless_or_visible(force_login=True)
             return
 
         _run_visible_extension_session(

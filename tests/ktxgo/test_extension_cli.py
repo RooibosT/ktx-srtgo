@@ -128,7 +128,7 @@ def test_extension_login_does_not_requeue_navigation_when_started_on_login_url(
     cli._ensure_extension_login(DummyAPI(), DummyRunner(), force_relogin=True)
 
 
-def test_extension_login_prompts_before_probe_when_started_on_login_url(
+def test_extension_login_reuses_visible_profile_before_prompt(
     monkeypatch,
 ) -> None:
     events: list[str] = []
@@ -150,11 +150,17 @@ def test_extension_login_prompts_before_probe_when_started_on_login_url(
         "stdin",
         type("DummyStdin", (), {"isatty": lambda self: True})(),
     )
-    monkeypatch.setattr(cli.click, "pause", lambda message="": events.append("pause"))
+    monkeypatch.setattr(
+        cli.click,
+        "pause",
+        lambda message="": (_ for _ in ()).throw(
+            AssertionError("valid profile should not require Enter")
+        ),
+    )
 
     cli._ensure_extension_login(DummyAPI(), DummyRunner(), force_relogin=False)
 
-    assert events == ["pause", "wait"]
+    assert events == ["wait"]
 
 
 def test_cli_extension_backend_uses_extension_runner(monkeypatch) -> None:
@@ -197,7 +203,7 @@ def test_cli_extension_backend_uses_extension_runner(monkeypatch) -> None:
     monkeypatch.setattr(cli, "BrowserManager", FailManager)
     monkeypatch.setattr(cli, "ExtensionBrowserRunner", DummyRunner)
     monkeypatch.setattr(cli, "ExtensionKorailAPI", DummyAPI)
-    monkeypatch.setattr(cli, "extension_login_cookie_cache_is_fresh", lambda: True)
+    monkeypatch.setattr(cli, "extension_login_cookie_cache_available", lambda: True)
     monkeypatch.setattr(
         cli,
         "_default_extension_chromium_executable",
@@ -300,11 +306,12 @@ def test_cli_visible_extension_starts_on_login_url(monkeypatch) -> None:
     assert captured["runner_kwargs"]["initial_url"] == cli.LOGIN_URL
 
 
-def test_cli_headless_extension_falls_back_to_minimized_visible_login(
+def test_cli_headless_extension_switches_visible_login_back_to_headless(
     monkeypatch,
 ) -> None:
     events: list[str] = []
     runner_initial_urls: list[str] = []
+    headless_wait_count = 0
 
     class FailManager:
         def __init__(self, **kwargs):
@@ -322,10 +329,6 @@ def test_cli_headless_extension_falls_back_to_minimized_visible_login(
         def close(self):
             events.append(f"runner:close:{self.headless}")
 
-        def restore_login_cookie_cache(self):
-            events.append(f"restore:{self.headless}")
-            return True
-
         def __enter__(self):
             self.start()
             return self
@@ -342,8 +345,12 @@ def test_cli_headless_extension_falls_back_to_minimized_visible_login(
             self.runner = runner
 
         def wait_for_login_stable(self, **kwargs):
+            nonlocal headless_wait_count
             events.append(f"wait:{self.runner.headless}")
-            return not self.runner.headless
+            if not self.runner.headless:
+                return True
+            headless_wait_count += 1
+            return headless_wait_count >= 2
 
         def search(self, *args, **kwargs):
             events.append(f"search:{self.runner.headless}")
@@ -358,7 +365,7 @@ def test_cli_headless_extension_falls_back_to_minimized_visible_login(
     monkeypatch.setattr(cli, "ExtensionBrowserRunner", DummyRunner)
     monkeypatch.setattr(cli, "ExtensionKorailAPI", DummyAPI)
     monkeypatch.setattr(cli, "_ensure_extension_login", fake_ensure_extension_login)
-    monkeypatch.setattr(cli, "extension_login_cookie_cache_is_fresh", lambda: False)
+    monkeypatch.setattr(cli, "extension_login_cookie_cache_available", lambda: False)
     monkeypatch.setattr(
         cli,
         "_default_extension_chromium_executable",
@@ -392,17 +399,131 @@ def test_cli_headless_extension_falls_back_to_minimized_visible_login(
 
     assert result.exit_code == 0
     assert events == [
+        "runner:init:True",
+        "runner:start:True",
+        "wait:True",
+        "runner:close:True",
         "runner:init:False",
         "runner:start:False",
         "ensure:False:True",
+        "runner:close:False",
+        "runner:init:True",
+        "runner:start:True",
+        "wait:True",
+        "search:True",
+        "runner:close:True",
+    ]
+    assert runner_initial_urls == [cli.LOGIN_URL, cli.LOGIN_URL, cli.LOGIN_URL]
+
+
+def test_cli_headless_extension_keeps_visible_when_handoff_fails(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+
+    class FailManager:
+        def __init__(self, **kwargs):
+            raise AssertionError("extension backend must not start Playwright")
+
+    class DummyRunner:
+        def __init__(self, **kwargs):
+            self.headless = bool(kwargs["headless"])
+            events.append(f"runner:init:{self.headless}")
+
+        def start(self):
+            events.append(f"runner:start:{self.headless}")
+
+        def close(self):
+            events.append(f"runner:close:{self.headless}")
+
+        def __enter__(self):
+            self.start()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+        def minimize(self) -> bool:
+            events.append(f"minimize:{self.headless}")
+            return True
+
+    class DummyAPI:
+        def __init__(self, runner):
+            self.runner = runner
+
+        def wait_for_login_stable(self, **kwargs):
+            events.append(f"wait:{self.runner.headless}")
+            return False
+
+        def search(self, *args, **kwargs):
+            events.append(f"search:{self.runner.headless}")
+            return []
+
+    def fake_ensure_extension_login(api, runner, *, force_relogin: bool = False):
+        events.append(f"ensure:{runner.headless}:{force_relogin}")
+        return api
+
+    monkeypatch.setattr(cli, "configure_keyring_backend", lambda: None)
+    monkeypatch.setattr(cli, "BrowserManager", FailManager)
+    monkeypatch.setattr(cli, "ExtensionBrowserRunner", DummyRunner)
+    monkeypatch.setattr(cli, "ExtensionKorailAPI", DummyAPI)
+    monkeypatch.setattr(cli, "_ensure_extension_login", fake_ensure_extension_login)
+    monkeypatch.setattr(cli, "extension_login_cookie_cache_available", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "_default_extension_chromium_executable",
+        lambda: Path("/tmp/chromium-123"),
+    )
+    monkeypatch.setattr(cli.click, "pause", lambda message="": events.append("pause"))
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        cli.sys,
+        "stdin",
+        type("DummyStdin", (), {"isatty": lambda self: True})(),
+    )
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "--no-interactive",
+            "--departure",
+            "서울",
+            "--arrival",
+            "부산",
+            "--date",
+            "20260422",
+            "--time",
+            "06",
+            "--max-attempts",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert events == [
+        "runner:init:True",
+        "runner:start:True",
+        "wait:True",
+        "runner:close:True",
+        "runner:init:False",
+        "runner:start:False",
+        "ensure:False:True",
+        "runner:close:False",
+        "runner:init:True",
+        "runner:start:True",
+        "wait:True",
+        "runner:close:True",
+        "runner:init:False",
+        "runner:start:False",
+        "ensure:False:False",
         "minimize:False",
         "search:False",
         "runner:close:False",
     ]
-    assert runner_initial_urls[0] == cli.LOGIN_URL
 
 
-def test_cli_headless_extension_uses_fresh_cookie_cache_without_login_probe(
+def test_cli_headless_extension_reuses_valid_profile_when_cookie_cache_missing(
     monkeypatch,
 ) -> None:
     events: list[str] = []
@@ -429,7 +550,8 @@ def test_cli_headless_extension_uses_fresh_cookie_cache_without_login_probe(
             self.runner = runner
 
         def wait_for_login_stable(self, **kwargs):
-            raise AssertionError("fresh cookie cache should skip loginCheck probe")
+            events.append(f"wait:{self.runner.headless}")
+            return True
 
         def search(self, *args, **kwargs):
             events.append(f"search:{self.runner.headless}")
@@ -446,7 +568,86 @@ def test_cli_headless_extension_uses_fresh_cookie_cache_without_login_probe(
             AssertionError("fresh cookie cache should not open visible login")
         ),
     )
-    monkeypatch.setattr(cli, "extension_login_cookie_cache_is_fresh", lambda: True)
+    monkeypatch.setattr(cli, "extension_login_cookie_cache_available", lambda: False)
+    monkeypatch.setattr(
+        cli,
+        "_default_extension_chromium_executable",
+        lambda: Path("/tmp/chromium-123"),
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "--no-interactive",
+            "--departure",
+            "서울",
+            "--arrival",
+            "부산",
+            "--date",
+            "20260422",
+            "--time",
+            "06",
+            "--max-attempts",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert events == [
+        "runner:init:True",
+        "runner:start:True",
+        "wait:True",
+        "search:True",
+        "runner:close:True",
+    ]
+    assert runner_initial_urls == [cli.LOGIN_URL]
+
+
+def test_cli_headless_extension_uses_cookie_cache_hint_without_login_probe(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+
+    class FailManager:
+        def __init__(self, **kwargs):
+            raise AssertionError("extension backend must not start Playwright")
+
+    class DummyRunner:
+        def __init__(self, **kwargs):
+            self.headless = bool(kwargs["headless"])
+            events.append(f"runner:init:{self.headless}")
+
+        def start(self):
+            events.append(f"runner:start:{self.headless}")
+
+        def close(self):
+            events.append(f"runner:close:{self.headless}")
+
+    class DummyAPI:
+        def __init__(self, runner):
+            self.runner = runner
+
+        def wait_for_login_stable(self, **kwargs):
+            raise AssertionError("cookie cache hint should skip loginCheck probe")
+
+        def search(self, *args, **kwargs):
+            events.append(f"search:{self.runner.headless}")
+            return []
+
+    monkeypatch.setattr(cli, "configure_keyring_backend", lambda: None)
+    monkeypatch.setattr(cli, "BrowserManager", FailManager)
+    monkeypatch.setattr(cli, "ExtensionBrowserRunner", DummyRunner)
+    monkeypatch.setattr(cli, "ExtensionKorailAPI", DummyAPI)
+    monkeypatch.setattr(
+        cli,
+        "_ensure_extension_login",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cookie cache hint should not open visible login")
+        ),
+    )
+    monkeypatch.setattr(cli, "extension_login_cookie_cache_available", lambda: True)
     monkeypatch.setattr(
         cli,
         "_default_extension_chromium_executable",
@@ -479,4 +680,3 @@ def test_cli_headless_extension_uses_fresh_cookie_cache_without_login_probe(
         "search:True",
         "runner:close:True",
     ]
-    assert runner_initial_urls == [cli.LOGIN_URL]

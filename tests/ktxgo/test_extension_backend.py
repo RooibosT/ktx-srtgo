@@ -13,7 +13,7 @@ from ktxgo.extension_backend import (
     ExtensionBrowserRunner,
     ExtensionControlServer,
     ExtensionKorailAPI,
-    extension_login_cookie_cache_is_fresh,
+    extension_login_cookie_cache_available,
     _profile_process_ids,
     write_extension_files,
 )
@@ -90,9 +90,7 @@ def test_extension_files_inject_page_context_xmlhttprequest(tmp_path) -> None:
     assert "pageReady = true" in content
     assert "window.postMessage" in content
     assert "KTXGO_GET_COOKIES" in content
-    assert "KTXGO_SET_COOKIES" in content
     assert "KTXGO_GET_COOKIES" in (tmp_path / "background.js").read_text()
-    assert "KTXGO_SET_COOKIES" in (tmp_path / "background.js").read_text()
     assert "document.cookie" in page
     assert "/command?wait=25" in content
     assert "setInterval(poll, 300)" not in content
@@ -691,6 +689,7 @@ def test_extension_browser_runner_saves_login_cookie_cache(
     payload = json.loads(cache_path.read_text())
     assert payload["saved_at"] == 1234.5
     assert payload["cookies"][0]["name"] == "JSESSIONID"
+    assert "ttl_s" not in payload
 
 
 def test_extension_browser_runner_saves_document_cookie_fallback(
@@ -758,9 +757,10 @@ def test_extension_browser_runner_saves_document_cookie_fallback(
     payload = json.loads(cache_path.read_text())
     assert payload["document_cookie"] == "JSESSIONID=abc; WMONID=xyz"
     assert payload["cookies"] == []
+    assert "ttl_s" not in payload
 
 
-def test_extension_login_cookie_cache_freshness(tmp_path) -> None:
+def test_extension_login_cookie_cache_available_does_not_apply_ttl(tmp_path) -> None:
     cache_path = tmp_path / "extension-cookies.json"
     cache_path.write_text(
         json.dumps(
@@ -778,113 +778,21 @@ def test_extension_login_cookie_cache_freshness(tmp_path) -> None:
         )
     )
 
-    assert extension_login_cookie_cache_is_fresh(
-        path=cache_path,
-        now=1_599.0,
-        ttl_s=600,
-    )
-    assert not extension_login_cookie_cache_is_fresh(
-        path=cache_path,
-        now=1_601.0,
-        ttl_s=600,
-    )
+    assert extension_login_cookie_cache_available(path=cache_path)
 
     cache_path.write_text(
         json.dumps(
             {
-                "saved_at": 2_000.0,
                 "cookies": [],
                 "document_cookie": "JSESSIONID=abc",
             }
         )
     )
-    assert extension_login_cookie_cache_is_fresh(
-        path=cache_path,
-        now=2_100.0,
-        ttl_s=600,
-    )
+    assert extension_login_cookie_cache_available(path=cache_path)
 
+    cache_path.write_text(json.dumps({"cookies": []}))
+    assert not extension_login_cookie_cache_available(path=cache_path)
 
-def test_extension_browser_runner_restores_login_cookie_cache(
-    monkeypatch,
-    tmp_path,
-) -> None:
-    cache_path = tmp_path / "extension-cookies.json"
-    cache_path.write_text(
-        json.dumps(
-            {
-                "saved_at": 1_000.0,
-                "cookies": [
-                    {
-                        "name": "JSESSIONID",
-                        "value": "abc",
-                        "domain": "www.korail.com",
-                        "path": "/",
-                    }
-                ],
-            }
-        )
-    )
-
-    class FakeServer:
-        origin = "http://127.0.0.1:12345"
-
-        def __init__(self) -> None:
-            self.command: dict[str, object] | None = None
-
-        def start(self) -> None:
-            pass
-
-        def close(self) -> None:
-            pass
-
-        def enqueue_command(self, command: dict[str, object]) -> str:
-            self.command = command
-            return "22"
-
-        def wait_for_result(self, command_id: str, *, timeout_s: float) -> dict[str, object]:
-            assert command_id == "22"
-            return {
-                "type": "set-cookies-result",
-                "id": "22",
-                "ok": True,
-                "count": 1,
-            }
-
-    fake_server = FakeServer()
-    monkeypatch.setattr(
-        "ktxgo.extension_backend.ExtensionControlServer",
-        lambda: fake_server,
-    )
-    monkeypatch.setattr("ktxgo.extension_backend.write_extension_files", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "ktxgo.extension_backend.subprocess.Popen",
-        lambda *a, **k: type("DummyProcess", (), {"terminate": lambda self: None})(),
-    )
-
-    runner = ExtensionBrowserRunner(
-        chromium_executable="/bin/chromium",
-        profile_dir=tmp_path / "profile",
-        initial_url="https://www.korail.com/ticket/search/general",
-    )
-    runner.start()
-
-    assert runner.restore_login_cookie_cache(
-        path=cache_path,
-        now=1_100.0,
-        ttl_s=600,
-    )
-    assert fake_server.command == {
-        "action": "set-cookies",
-        "cookies": [
-            {
-                "name": "JSESSIONID",
-                "value": "abc",
-                "domain": "www.korail.com",
-                "path": "/",
-            }
-        ],
-    }
 
 
 def test_default_extension_chromium_prefers_playwright_chromium_1105(
