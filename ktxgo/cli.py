@@ -78,6 +78,8 @@ _INTERACTIVE_DEFAULT_SERVICE = "KTX"
 _INTERACTIVE_BOOL_TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _INTERACTIVE_BOOL_FALSE_VALUES = {"0", "false", "no", "n", "off"}
 _INTERACTIVE_SEAT_CHOICES = {"general", "special", "any", "standing"}
+_LOGIN_KEEPALIVE_INTERVAL_S = 120.0
+_LOGIN_KEEPALIVE_FAILURES_BEFORE_REAUTH = 2
 
 
 def _is_session_expired_error(exc: KorailError) -> bool:
@@ -610,7 +612,6 @@ def _train_choice_label(idx: int, train: Train) -> str:
             (f"{train.departure}->{train.arrival}", 15, "left"),
             (f"일반:{train.general_seat}", 14, "left"),
             (f"특석:{train.special_seat}", 14, "left"),
-            (f"입석:{train.standing_seat}", 14, "left"),
             (f"예약대기:{train.waiting_status}", 14, "left"),
         ]
     )
@@ -2301,6 +2302,34 @@ def _run_reservation_loop(
 
     attempt = 0
     consecutive_errors = 0
+    last_login_keepalive_at = time.monotonic()
+    login_keepalive_failures = 0
+
+    def _keep_login_alive_if_due(api: KorailAPI) -> KorailAPI:
+        nonlocal last_login_keepalive_at, login_keepalive_failures
+        now = time.monotonic()
+        if now - last_login_keepalive_at < _LOGIN_KEEPALIVE_INTERVAL_S:
+            return api
+        last_login_keepalive_at = now
+        if api.is_logged_in():
+            login_keepalive_failures = 0
+            return api
+        login_keepalive_failures += 1
+        if login_keepalive_failures < _LOGIN_KEEPALIVE_FAILURES_BEFORE_REAUTH:
+            click.echo(
+                f"[{_now()}] Login keepalive was not confirmed "
+                f"({login_keepalive_failures}/"
+                f"{_LOGIN_KEEPALIVE_FAILURES_BEFORE_REAUTH}); will retry."
+            )
+            return api
+        click.echo(
+            f"[{_now()}] Login keepalive failed repeatedly. Re-authenticating..."
+        )
+        api = reauthenticate(api, "keepalive")
+        login_keepalive_failures = 0
+        last_login_keepalive_at = time.monotonic()
+        return api
+
     while max_attempts == 0 or attempt < max_attempts:
         attempt += 1
 
@@ -2336,6 +2365,7 @@ def _run_reservation_loop(
         click.echo(f"[{_now()}] Attempt {attempt}  ({departure}→{arrival})")
         if not trains:
             click.echo("No trains returned")
+            api = _keep_login_alive_if_due(api)
             time.sleep(POLL_INTERVAL_S)
             continue
 
@@ -2351,6 +2381,7 @@ def _run_reservation_loop(
                     f"Selected trains not present now: {missing_count}/{len(target_trains)}"
                 )
             if not candidate_trains:
+                api = _keep_login_alive_if_due(api)
                 time.sleep(POLL_INTERVAL_S)
                 continue
 
@@ -2436,6 +2467,7 @@ def _run_reservation_loop(
 
             return
 
+        api = _keep_login_alive_if_due(api)
         time.sleep(POLL_INTERVAL_S)
 
 
@@ -2917,18 +2949,6 @@ def main(
                     "You may minimize it manually; do not close it during reservation."
                 )
 
-        def _run_visible_extension_login(*, force_login: bool) -> None:
-            with _make_extension_runner(
-                runner_headless=False,
-                runner_initial_url=LOGIN_URL,
-            ) as visible_runner:
-                visible_api = ExtensionKorailAPI(visible_runner)
-                _ensure_extension_login(
-                    visible_api,
-                    visible_runner,
-                    force_relogin=force_login,
-                )
-
         def _run_visible_extension_session(
             *,
             minimize_after_login: bool,
@@ -2971,7 +2991,6 @@ def main(
             login_probe_timeout_s: float | None,
             cache_hint: bool = False,
             success_message: str | None = None,
-            success_elapsed_started_at: float | None = None,
         ) -> bool:
             runner = _make_extension_runner(
                 runner_headless=True,
@@ -3002,11 +3021,6 @@ def main(
                     if callable(save_login_cookie_cache):
                         save_login_cookie_cache()
                     if success_message is not None:
-                        if success_elapsed_started_at is not None:
-                            elapsed_s = time.monotonic() - success_elapsed_started_at
-                            success_message = success_message.format(
-                                elapsed_s=elapsed_s
-                            )
                         click.echo(f"[{_now()}] {success_message}")
 
                 def _headless_extension_reauthenticate(
@@ -3048,38 +3062,29 @@ def main(
                 if visible_fallback_runner is not None:
                     visible_fallback_runner.close()
 
-        def _run_visible_login_then_headless_or_visible(*, force_login: bool) -> None:
-            _run_visible_extension_login(force_login=force_login)
-            click.echo(
-                f"[{_now()}] Switching logged-in Chromium profile to headless..."
-            )
-            handoff_started_at = time.monotonic()
-            if _run_headless_extension_session(
-                login_probe_timeout_s=10.0,
-                success_message="Headless handoff confirmed in {elapsed_s:.1f}s.",
-                success_elapsed_started_at=handoff_started_at,
-            ):
-                return
-            elapsed_s = time.monotonic() - handoff_started_at
-            click.echo(
-                f"[{_now()}] Headless handoff was not confirmed in {elapsed_s:.1f}s. "
-                "Keeping visible Chromium session."
-            )
+        def _run_visible_extension_session_for_headless(*, force_login: bool) -> None:
             _run_visible_extension_session(
                 minimize_after_login=True,
-                force_login=False,
+                force_login=force_login,
             )
 
         if headless and force_relogin:
-            _run_visible_login_then_headless_or_visible(force_login=True)
+            _run_visible_extension_session_for_headless(force_login=True)
             return
 
         if headless:
             if extension_login_cookie_cache_available():
-                _run_headless_extension_session(
-                    login_probe_timeout_s=None,
+                if _run_headless_extension_session(
+                    login_probe_timeout_s=4,
                     cache_hint=True,
+                    success_message="Confirmed saved extension login session.",
+                ):
+                    return
+                click.echo(
+                    f"[{_now()}] Saved extension login cache did not confirm login. "
+                    "Opening visible Chromium login..."
                 )
+                _run_visible_extension_session_for_headless(force_login=True)
                 return
 
             click.echo(f"[{_now()}] Checking saved extension Chromium profile...")
@@ -3093,7 +3098,7 @@ def main(
                 f"[{_now()}] Saved extension Chromium profile is not logged in. "
                 "Opening visible Chromium login..."
             )
-            _run_visible_login_then_headless_or_visible(force_login=True)
+            _run_visible_extension_session_for_headless(force_login=True)
             return
 
         _run_visible_extension_session(

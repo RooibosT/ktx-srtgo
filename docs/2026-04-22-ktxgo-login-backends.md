@@ -6,12 +6,13 @@ The supported KTX reservation path is the Chromium extension backend:
 
 1. Start a normal, non-Playwright-controlled Chromium process with the KTXGO extension.
 2. Let the user complete Korail login in the visible window when needed.
-3. After a required visible login in `--headless` mode, close the login window and reopen the same Chromium profile headlessly.
+3. If a cached/profile login is confirmed, run headlessly. If visible login is required, keep that logged-in visible Chromium session alive and minimize it.
 4. Keep using that Chromium profile/session for page-context `XMLHttpRequest` API calls.
 5. Run the polling/reservation loop through `ExtensionKorailAPI`.
-6. Save `~/.ktxgo/extension_cookies.json` only as a fast-path hint that a recent extension login happened.
+6. During idle polling attempts, periodically call `loginCheck` as a keepalive so the member login session is refreshed before a reservation opportunity appears; a single unconfirmed keepalive does not immediately force visible login.
+7. Save `~/.ktxgo/extension_cookies.json` only as a fast-path hint that a recent extension login happened.
 
-The cookie cache has no app-side fixed TTL. Korail owns the real session lifetime. If no cache hint exists, KTXGO probes the saved Chromium profile before asking the user to log in again. If visible login is required during a headless run, KTXGO measures a headless handoff attempt and falls back to the visible session path if the handoff is not confirmed quickly. If a cached/profile session later expires, the reservation loop reopens visible Chromium login.
+The cookie cache has no app-side fixed TTL. Korail owns the real session lifetime. KTXGO treats the cache as a hint, then confirms member login with `loginCheck` before trusting a headless cached session. Login confirmation is strict: a bare `strResult=SUCC` is not enough unless member identity or an explicit login flag is present. If visible login is required during a headless run, KTXGO keeps that logged-in browser session instead of closing it for a headless handoff, because session cookies may not survive an immediate process switch. The polling loop keeps the member login session warm with periodic login checks when no reservation candidate is being submitted. If repeated keepalive checks fail or a cached/profile session later expires, the reservation loop reopens visible Chromium login.
 
 ## Retired or diagnostic-only approaches
 

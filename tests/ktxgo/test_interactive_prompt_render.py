@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 
 from ktxgo import cli
+from ktxgo.korail import Train
 
 
 def test_prompt_render_uses_terminal_height_not_width() -> None:
@@ -86,3 +87,32 @@ def test_prompt_render_truncates_options_to_terminal_width(monkeypatch) -> None:
 
     assert printed
     assert cli._display_width(printed[0]) <= 17
+
+
+def test_train_choice_label_omits_standing_seat_status() -> None:
+    train = Train(
+        train_no="041",
+        train_type="KTX",
+        train_group="KTX",
+        departure="대전",
+        arrival="부산",
+        dep_time="16:10",
+        arr_time="17:48",
+        dep_date="20260429",
+        general_seat="매진",
+        general_code="",
+        special_seat="매진",
+        special_code="",
+        standing_seat="매진",
+        waiting_seat="가능",
+        waiting_code="",
+        price="",
+        raw={},
+    )
+
+    label = cli._train_choice_label(0, train)
+
+    assert "일반:매진" in label
+    assert "특석:매진" in label
+    assert "예약대기:가능" in label
+    assert "입석:" not in label

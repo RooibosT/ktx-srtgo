@@ -282,6 +282,115 @@ def test_cli_keeps_waitlist_success_when_alert_registration_fails(monkeypatch) -
     assert "alert registration failed" in result.output
 
 
+def test_reservation_loop_keeps_login_alive_between_search_attempts(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    train = _make_waitlist_train()
+
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.search_count = 0
+
+        def search(self, *args, **kwargs) -> list[Train]:
+            del args, kwargs
+            self.search_count += 1
+            events.append(f"search:{self.search_count}")
+            if self.search_count == 1:
+                return []
+            return [train]
+
+        def is_logged_in(self) -> bool:
+            events.append("keepalive")
+            return True
+
+        def reserve(
+            self,
+            train: Train,
+            seat_type: str = "general",
+            adults: int = 1,
+            waitlist: bool = False,
+        ) -> dict[str, object]:
+            del train, seat_type, adults
+            assert waitlist is True
+            events.append("reserve")
+            return {"h_pnr_no": "PNR123", "strResult": "SUCC"}
+
+        def set_waitlist_alert(self, pnr_no: str, phone: str) -> dict[str, object]:
+            raise AssertionError("phone is not configured in this test")
+
+    monkeypatch.setattr(cli, "_LOGIN_KEEPALIVE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(cli.keyring, "get_password", lambda service, key: None)
+
+    cli._run_reservation_loop(
+        DummyAPI(),  # type: ignore[arg-type]
+        reauthenticate=lambda api, stage: api,
+        interactive_mode=False,
+        departure="서울",
+        arrival="부산",
+        date="20260320",
+        time_str="07",
+        adults=1,
+        train_types=("ktx",),
+        seat="any",
+        auto_pay=False,
+        smart_ticket=True,
+        telegram=False,
+        waitlist_alert_phone=None,
+        max_attempts=2,
+    )
+
+    assert events == ["search:1", "keepalive", "search:2", "reserve"]
+
+
+def test_reservation_loop_does_not_reauthenticate_on_single_keepalive_miss(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.search_count = 0
+
+        def search(self, *args, **kwargs) -> list[Train]:
+            del args, kwargs
+            self.search_count += 1
+            events.append(f"search:{self.search_count}")
+            return []
+
+        def is_logged_in(self) -> bool:
+            events.append("keepalive:false")
+            return False
+
+    def fail_reauthenticate(api: object, stage: str) -> object:
+        raise AssertionError(f"single keepalive miss must not reauthenticate: {stage}")
+
+    monkeypatch.setattr(cli, "_LOGIN_KEEPALIVE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(cli, "_LOGIN_KEEPALIVE_FAILURES_BEFORE_REAUTH", 2)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    cli._run_reservation_loop(
+        DummyAPI(),  # type: ignore[arg-type]
+        reauthenticate=fail_reauthenticate,  # type: ignore[arg-type]
+        interactive_mode=False,
+        departure="서울",
+        arrival="부산",
+        date="20260320",
+        time_str="07",
+        adults=1,
+        train_types=("ktx",),
+        seat="any",
+        auto_pay=False,
+        smart_ticket=True,
+        telegram=False,
+        waitlist_alert_phone=None,
+        max_attempts=1,
+    )
+
+    assert events == ["search:1", "keepalive:false"]
+
+
 def test_load_saved_interactive_defaults_sanitizes_invalid_values(monkeypatch) -> None:
     monkeypatch.setattr(
         cli.keyring,

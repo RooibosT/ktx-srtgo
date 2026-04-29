@@ -1183,24 +1183,20 @@ class KorailAPI:
             return False
 
         # loginCheck returns strResult=SUCC even when NOT logged in.
-        # Must check h_msg_txt to distinguish.
+        # Must require a member identity or explicit login flag; bare SUCC only
+        # means the loginCheck request itself succeeded.
         msg = str(data.get("h_msg_txt", "")).strip()
         if "로그인 정보가 없습니다" in msg or "로그인" in msg and "없" in msg:
             return False
 
-        # Positive indicators
-        if data.get("strResult") in {"SUCC", "SUCCESS", "Y"}:
-            # Double-check: presence of member credentials confirms login
-            for key in ("strMbCrdNo", "strCustNm", "mbCrdNo"):
-                value = str(data.get(key, "")).strip()
-                if value and value not in {"N", "FALSE", "0"}:
-                    return True
-            # strResult=SUCC without negative msg — likely logged in
-            return True
+        for key in ("strMbCrdNo", "strCustNm", "mbCrdNo", "strCustNo", "custNo"):
+            value = str(data.get(key, "")).strip()
+            if value and value.upper() not in {"N", "FALSE", "0"}:
+                return True
 
-        for key in ("loginYn", "isLogin"):
+        for key in ("loginYn", "isLogin", "strLoginYn"):
             value = str(data.get(key, "")).strip().upper()
-            if value and value not in {"N", "FALSE", "0"}:
+            if value in {"Y", "YES", "TRUE", "1"}:
                 return True
         return False
 
@@ -1237,8 +1233,6 @@ class KorailAPI:
                 break
 
         if not any((member_no, name, login_id)):
-            if data.get("strResult") in {"SUCC", "SUCCESS", "Y"}:
-                return {"member_no": "", "name": "", "login_id": ""}
             return None
 
         return {
