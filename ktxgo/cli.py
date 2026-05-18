@@ -143,7 +143,10 @@ def _sanitize_saved_date(value: str | None, fallback: str) -> str:
     if not candidate:
         return fallback
     try:
-        return _validate_date(candidate)
+        validated = _validate_date(candidate)
+        if datetime.strptime(validated, "%Y%m%d").date() < datetime.now().date():
+            return fallback
+        return validated
     except click.BadParameter:
         return fallback
 
