@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -17,6 +18,8 @@ from .korail import KorailAPI, KorailError
 
 
 EXTENSION_COOKIE_CACHE_PATH = DATA_DIR / "extension_cookies.json"
+_CHROME_COOKIE_EPOCH_OFFSET_S = 11_644_473_600
+_PROFILE_SESSION_COOKIE_PERSIST_S = 86_400
 
 
 def extension_login_cookie_cache_available(
@@ -121,6 +124,43 @@ def _terminate_processes(process_ids: list[int], *, grace_s: float = 2.0) -> Non
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
+
+
+def _chrome_cookie_expires_utc(unix_time_s: float) -> int:
+    return int((unix_time_s + _CHROME_COOKIE_EPOCH_OFFSET_S) * 1_000_000)
+
+
+def _persist_profile_session_cookies(
+    profile_dir: Path,
+    *,
+    now: float | None = None,
+) -> int:
+    """Make Korail session cookies survive Chromium restarts in the dedicated profile."""
+    cookies_db = profile_dir / "Default" / "Cookies"
+    if not cookies_db.is_file():
+        return 0
+
+    expires_utc = _chrome_cookie_expires_utc(
+        (time.time() if now is None else now) + _PROFILE_SESSION_COOKIE_PERSIST_S
+    )
+    try:
+        con = sqlite3.connect(cookies_db)
+        try:
+            cursor = con.execute(
+                """
+                update cookies
+                set expires_utc = ?, has_expires = 1, is_persistent = 1
+                where host_key like ?
+                  and (expires_utc = 0 or has_expires = 0 or is_persistent = 0)
+                """,
+                (expires_utc, "%korail.com"),
+            )
+            con.commit()
+            return int(cursor.rowcount if cursor.rowcount is not None else 0)
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return 0
 
 
 class ExtensionRunner(Protocol):
@@ -356,6 +396,19 @@ def write_extension_files(extension_dir: Path, *, control_origin: str) -> None:
       }});
       return;
     }}
+    if (command.action === "set-cookies") {{
+      chrome.runtime.sendMessage({{type: "KTXGO_SET_COOKIES", id: command.id, cookies: command.cookies || []}}, (reply) => {{
+        const runtimeError = chrome.runtime.lastError;
+        report({{
+          type: "set-cookies-result",
+          id: command.id,
+          ok: !runtimeError && !!reply && reply.ok === true,
+          count: reply && Number.isFinite(Number(reply.count)) ? Number(reply.count) : 0,
+          error: runtimeError ? runtimeError.message : ((reply && reply.error) || ""),
+        }});
+      }});
+      return;
+    }}
     postPageCommand(command);
   }};
 
@@ -413,6 +466,67 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ok: !runtimeError,
         error: runtimeError ? runtimeError.message : "",
         cookies: cookies || [],
+      });
+    });
+    return true;
+  }
+
+  if (message && message.type === "KTXGO_SET_COOKIES") {
+    const cookies = Array.isArray(message.cookies) ? message.cookies : [];
+    if (!cookies.length) {
+      sendResponse({ok: false, error: "No cookies to restore", count: 0});
+      return false;
+    }
+
+    const cookieUrl = (cookie) => {
+      const rawDomain = String(cookie.domain || "www.korail.com");
+      const domain = rawDomain.replace(/^\\./, "") || "www.korail.com";
+      const rawPath = String(cookie.path || "/");
+      const path = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+      return `https://${domain}${path}`;
+    };
+
+    let remaining = cookies.length;
+    let restored = 0;
+    const failures = [];
+    const finishOne = () => {
+      remaining -= 1;
+      if (remaining > 0) return;
+      sendResponse({
+        ok: restored > 0 && failures.length === 0,
+        error: failures.join("; "),
+        count: restored,
+      });
+    };
+
+    cookies.forEach((cookie) => {
+      const name = String(cookie.name || "");
+      if (!name) {
+        failures.push("cookie without name");
+        finishOne();
+        return;
+      }
+
+      const details = {
+        url: cookieUrl(cookie),
+        name,
+        value: String(cookie.value || ""),
+        path: String(cookie.path || "/"),
+      };
+      if (cookie.domain) details.domain = String(cookie.domain);
+      if (typeof cookie.secure === "boolean") details.secure = cookie.secure;
+      if (typeof cookie.httpOnly === "boolean") details.httpOnly = cookie.httpOnly;
+      if (typeof cookie.expirationDate === "number") details.expirationDate = cookie.expirationDate;
+      if (cookie.sameSite) details.sameSite = String(cookie.sameSite);
+
+      chrome.cookies.set(details, () => {
+        const runtimeError = chrome.runtime.lastError;
+        if (runtimeError) {
+          failures.push(`${name}: ${runtimeError.message}`);
+        } else {
+          restored += 1;
+        }
+        finishOne();
       });
     });
     return true;
@@ -511,6 +625,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         id: command.id,
         ok: true,
         cookie: document.cookie || "",
+      });
+      return;
+    }
+    if (command.action === "set-document-cookies") {
+      const rawCookie = String(command.cookie || "");
+      let restored = 0;
+      rawCookie.split(";").forEach((part) => {
+        const cookie = part.trim();
+        if (!cookie || !cookie.includes("=")) return;
+        document.cookie = `${cookie}; path=/; SameSite=None; Secure`;
+        restored += 1;
+      });
+      send({
+        type: "set-document-cookies-result",
+        id: command.id,
+        ok: restored > 0,
+        count: restored,
       });
       return;
     }
@@ -648,6 +779,7 @@ class ExtensionBrowserRunner:
             except Exception:
                 pass
             self.process = None
+            _persist_profile_session_cookies(self.profile_dir)
         if self.server is not None:
             self.server.close()
             self.server = None
@@ -772,6 +904,56 @@ class ExtensionBrowserRunner:
         except OSError:
             return False
         return True
+
+    def restore_login_cookie_cache(
+        self,
+        *,
+        path: Path | None = None,
+    ) -> bool:
+        if self.server is None:
+            raise RuntimeError("Extension browser runner is not started")
+
+        cache_path = path or EXTENSION_COOKIE_CACHE_PATH
+        try:
+            payload = json.loads(cache_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+
+        cookies_obj = payload.get("cookies")
+        cookies = [
+            cast(dict[str, object], cookie)
+            for cookie in (cookies_obj if isinstance(cookies_obj, list) else [])
+            if isinstance(cookie, dict)
+        ]
+        if cookies:
+            command_id = self.server.enqueue_command(
+                {"action": "set-cookies", "cookies": cookies}
+            )
+            try:
+                result = self.server.wait_for_result(
+                    command_id,
+                    timeout_s=min(5.0, self.command_timeout_s),
+                )
+            except TimeoutError:
+                return False
+            return bool(result.get("ok", False))
+
+        document_cookie = str(payload.get("document_cookie") or "").strip()
+        if not document_cookie:
+            return False
+        command_id = self.server.enqueue_command(
+            {"action": "set-document-cookies", "cookie": document_cookie}
+        )
+        try:
+            result = self.server.wait_for_result(
+                command_id,
+                timeout_s=min(5.0, self.command_timeout_s),
+            )
+        except TimeoutError:
+            return False
+        return bool(result.get("ok", False))
 
     def navigate(self, url: str) -> bool:
         if self.server is None:

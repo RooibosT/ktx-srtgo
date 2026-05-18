@@ -50,6 +50,36 @@ def _make_waitlist_train() -> Train:
     )
 
 
+def _make_unavailable_train() -> Train:
+    return Train.from_schedule(
+        {
+            "h_trn_no": "00456",
+            "h_car_tp_nm": "KTX",
+            "h_trn_clsf_nm": "KTX",
+            "h_trn_gp_nm": "KTX",
+            "h_dpt_rs_stn_nm": "서울",
+            "h_arv_rs_stn_nm": "부산",
+            "h_dpt_tm_qb": "09:10",
+            "h_arv_tm_qb": "11:59",
+            "h_dpt_dt": "20260320",
+            "h_gen_rsv_nm": "매진",
+            "h_gen_rsv_cd": "13",
+            "h_spe_rsv_nm": "매진",
+            "h_spe_rsv_cd": "13",
+            "h_stnd_rsv_nm": "없음",
+            "h_stnd_rsv_cd": "13",
+            "h_wait_rsv_nm": "불가",
+            "h_wait_rsv_cd": "13",
+            "h_rcvd_amt": "0059800",
+            "h_trn_clsf_cd": "100",
+            "h_trn_gp_cd": "100",
+            "h_dpt_rs_stn_cd": "0001",
+            "h_arv_rs_stn_cd": "0020",
+            "h_run_dt": "20260320",
+        }
+    )
+
+
 def _patch_cli_runtime(monkeypatch) -> None:
     monkeypatch.setattr(cli, "BrowserManager", _DummyManager)
     monkeypatch.setattr(
@@ -389,6 +419,51 @@ def test_reservation_loop_does_not_reauthenticate_on_single_keepalive_miss(
     )
 
     assert events == ["search:1", "keepalive:false"]
+
+
+def test_reservation_loop_repeats_attempts_without_printing_train_results(
+    monkeypatch,
+) -> None:
+    train = _make_unavailable_train()
+    messages: list[str] = []
+
+    class DummyAPI:
+        def search(self, *args, **kwargs) -> list[Train]:
+            del args, kwargs
+            return [train]
+
+        def is_logged_in(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        cli.click, "echo", lambda message="": messages.append(str(message))
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    cli._run_reservation_loop(
+        DummyAPI(),  # type: ignore[arg-type]
+        reauthenticate=lambda api, stage: api,
+        interactive_mode=False,
+        departure="서울",
+        arrival="부산",
+        date="20260320",
+        time_str="07",
+        adults=1,
+        train_types=("ktx",),
+        seat="any",
+        auto_pay=False,
+        smart_ticket=True,
+        telegram=False,
+        waitlist_alert_phone=None,
+        max_attempts=2,
+    )
+
+    output = "\n".join(messages)
+
+    assert "Attempt 1" in output
+    assert "Attempt 2" in output
+    assert "idx train" not in output
+    assert "00456" not in output
 
 
 def test_load_saved_interactive_defaults_sanitizes_invalid_values(monkeypatch) -> None:

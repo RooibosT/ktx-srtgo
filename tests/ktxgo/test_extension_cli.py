@@ -606,6 +606,10 @@ def test_cli_headless_extension_confirms_cookie_cache_login_before_search(
         def close(self):
             events.append(f"runner:close:{self.headless}")
 
+        def restore_login_cookie_cache(self) -> bool:
+            events.append(f"restore:{self.headless}")
+            return True
+
     class DummyAPI:
         def __init__(self, runner):
             self.runner = runner
@@ -659,6 +663,7 @@ def test_cli_headless_extension_confirms_cookie_cache_login_before_search(
     assert events == [
         "runner:init:True",
         "runner:start:True",
+        "restore:True",
         "wait:True",
         "search:True",
         "runner:close:True",

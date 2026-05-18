@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 
@@ -13,6 +14,8 @@ from ktxgo.extension_backend import (
     ExtensionBrowserRunner,
     ExtensionControlServer,
     ExtensionKorailAPI,
+    _chrome_cookie_expires_utc,
+    _persist_profile_session_cookies,
     extension_login_cookie_cache_available,
     _profile_process_ids,
     write_extension_files,
@@ -758,6 +761,135 @@ def test_extension_browser_runner_saves_document_cookie_fallback(
     assert payload["document_cookie"] == "JSESSIONID=abc; WMONID=xyz"
     assert payload["cookies"] == []
     assert "ttl_s" not in payload
+
+
+def test_extension_browser_runner_restores_login_cookie_cache(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cache_path = tmp_path / "extension-cookies.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "JSESSIONID",
+                        "value": "abc",
+                        "domain": "www.korail.com",
+                        "path": "/",
+                    }
+                ],
+                "document_cookie": "",
+            }
+        )
+    )
+
+    class FakeServer:
+        origin = "http://127.0.0.1:12345"
+
+        def __init__(self) -> None:
+            self.command: dict[str, object] | None = None
+
+        def start(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+        def enqueue_command(self, command: dict[str, object]) -> str:
+            self.command = command
+            return "21"
+
+        def wait_for_result(self, command_id: str, *, timeout_s: float) -> dict[str, object]:
+            assert command_id == "21"
+            return {
+                "type": "set-cookies-result",
+                "id": "21",
+                "ok": True,
+            }
+
+    fake_server = FakeServer()
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.ExtensionControlServer",
+        lambda: fake_server,
+    )
+    monkeypatch.setattr("ktxgo.extension_backend.write_extension_files", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "ktxgo.extension_backend.subprocess.Popen",
+        lambda *a, **k: type("DummyProcess", (), {"terminate": lambda self: None})(),
+    )
+
+    runner = ExtensionBrowserRunner(
+        chromium_executable="/bin/chromium",
+        profile_dir=tmp_path / "profile",
+        initial_url="https://www.korail.com/ticket/login",
+    )
+    runner.start()
+
+    assert runner.restore_login_cookie_cache(path=cache_path) is True
+    assert fake_server.command == {
+        "action": "set-cookies",
+        "cookies": [
+            {
+                "name": "JSESSIONID",
+                "value": "abc",
+                "domain": "www.korail.com",
+                "path": "/",
+            }
+        ],
+    }
+
+
+def test_persist_profile_session_cookies_keeps_korail_login_after_restart(
+    tmp_path,
+) -> None:
+    cookies_db = tmp_path / "profile" / "Default" / "Cookies"
+    cookies_db.parent.mkdir(parents=True)
+    con = sqlite3.connect(cookies_db)
+    con.execute(
+        """
+        create table cookies (
+            host_key text,
+            name text,
+            expires_utc integer,
+            has_expires integer,
+            is_persistent integer
+        )
+        """
+    )
+    con.execute(
+        "insert into cookies values (?, ?, ?, ?, ?)",
+        ("www.korail.com", "JSESSIONID", 0, 0, 0),
+    )
+    con.execute(
+        "insert into cookies values (?, ?, ?, ?, ?)",
+        ("example.com", "JSESSIONID", 0, 0, 0),
+    )
+    con.commit()
+    con.close()
+
+    assert _persist_profile_session_cookies(tmp_path / "profile", now=1_000.0) == 1
+
+    con = sqlite3.connect(cookies_db)
+    rows = con.execute(
+        """
+        select host_key, name, expires_utc, has_expires, is_persistent
+        from cookies
+        order by host_key
+        """
+    ).fetchall()
+    con.close()
+
+    assert rows == [
+        ("example.com", "JSESSIONID", 0, 0, 0),
+        (
+            "www.korail.com",
+            "JSESSIONID",
+            _chrome_cookie_expires_utc(1_000.0 + 86_400),
+            1,
+            1,
+        ),
+    ]
 
 
 def test_extension_login_cookie_cache_available_does_not_apply_ttl(tmp_path) -> None:

@@ -2364,22 +2364,13 @@ def _run_reservation_loop(
 
         click.echo(f"[{_now()}] Attempt {attempt}  ({departure}→{arrival})")
         if not trains:
-            click.echo("No trains returned")
             api = _keep_login_alive_if_due(api)
             time.sleep(POLL_INTERVAL_S)
             continue
 
-        _print_results(trains)
-
         candidate_trains = trains
         if target_trains is not None:
-            candidate_trains, missing_count = _resolve_targets(
-                trains, target_trains
-            )
-            if missing_count:
-                click.echo(
-                    f"Selected trains not present now: {missing_count}/{len(target_trains)}"
-                )
+            candidate_trains, _ = _resolve_targets(trains, target_trains)
             if not candidate_trains:
                 api = _keep_login_alive_if_due(api)
                 time.sleep(POLL_INTERVAL_S)
@@ -3006,6 +2997,13 @@ def main(
                         f"[{_now()}] Using extension login cookie cache "
                         "with headless Chromium."
                     )
+                    restore_login_cookie_cache = getattr(
+                        runner,
+                        "restore_login_cookie_cache",
+                        None,
+                    )
+                    if callable(restore_login_cookie_cache):
+                        restore_login_cookie_cache()
                 if login_probe_timeout_s is not None:
                     if not extension_api.wait_for_login_stable(
                         timeout_s=login_probe_timeout_s,
@@ -3249,21 +3247,12 @@ def main(
 
             click.echo(f"[{_now()}] Attempt {attempt}  ({departure}→{arrival})")
             if not trains:
-                click.echo("No trains returned")
                 time.sleep(POLL_INTERVAL_S)
                 continue
 
-            _print_results(trains)
-
             candidate_trains = trains
             if target_trains is not None:
-                candidate_trains, missing_count = _resolve_targets(
-                    trains, target_trains
-                )
-                if missing_count:
-                    click.echo(
-                        f"Selected trains not present now: {missing_count}/{len(target_trains)}"
-                    )
+                candidate_trains, _ = _resolve_targets(trains, target_trains)
                 if not candidate_trains:
                     time.sleep(POLL_INTERVAL_S)
                     continue
