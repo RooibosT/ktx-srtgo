@@ -177,3 +177,28 @@ DEFAULT_VISIBLE_STATIONS = [
     "동대구",
     "부산",
 ]
+
+# Korail station codes used by the official web search page.  The search page
+# can often recover from station names alone, but including known codes matches
+# the browser flow more closely for the external Firefox handoff.
+STATION_CODE_BY_NAME = {
+    "서울": "0001",
+    "부산": "0020",
+    "수서": "0551",
+    "경주": "0508",
+    "광주송정": "0036",
+    "김천구미": "0507",
+    "대전": "0010",
+    "동대구": "0015",
+    "목포": "0041",
+    "밀양": "0017",
+    "서대구": "0506",
+    "순천": "0051",
+    "오송": "0297",
+    "울산(통도사)": "0509",
+    "익산": "0030",
+    "전주": "0045",
+    "창원중앙": "0512",
+    "천안아산": "0502",
+    "포항": "0515",
+}

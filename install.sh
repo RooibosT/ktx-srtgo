@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHOICE_FILE="${ROOT_DIR}/.install_manager"
 CONDA_ENV_FILE="${ROOT_DIR}/.install_conda_env"
 PYTHON_VERSION="3.11"
+PLAYWRIGHT_VERSION="1.42.0"
+PLAYWRIGHT_BROWSERS_DIR="${PLAYWRIGHT_BROWSERS_PATH:-${ROOT_DIR}/.cache/ms-playwright}"
 CONDA_ENV_NAME="srtgo-env"
 MANAGER=""
 RECONFIGURE=0
@@ -90,10 +92,12 @@ setup_uv() {
   uv venv --python "${PYTHON_VERSION}" "${ROOT_DIR}/.venv"
 
   log "Installing Python dependencies for srtgo + ktxgo"
-  uv pip install --python "${ROOT_DIR}/.venv/bin/python" -e "${ROOT_DIR}" playwright
+  uv pip install --python "${ROOT_DIR}/.venv/bin/python" -e "${ROOT_DIR}" "playwright==${PLAYWRIGHT_VERSION}"
 
-  log "Installing Playwright Firefox browser"
-  uv run --python "${ROOT_DIR}/.venv/bin/python" playwright install firefox
+  log "Installing Playwright Firefox + Chromium browsers"
+  mkdir -p "${PLAYWRIGHT_BROWSERS_DIR}"
+  PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_DIR}" \
+    "${ROOT_DIR}/.venv/bin/python" -m playwright install firefox chromium
 
   cat <<EOF
 
@@ -127,10 +131,12 @@ setup_conda() {
   fi
 
   log "Installing Python dependencies for srtgo + ktxgo"
-  conda run -n "${CONDA_ENV_NAME}" pip install -e "${ROOT_DIR}" playwright
+  conda run -n "${CONDA_ENV_NAME}" pip install -e "${ROOT_DIR}" "playwright==${PLAYWRIGHT_VERSION}"
 
-  log "Installing Playwright Firefox browser"
-  conda run -n "${CONDA_ENV_NAME}" python -m playwright install firefox
+  log "Installing Playwright Firefox + Chromium browsers"
+  mkdir -p "${PLAYWRIGHT_BROWSERS_DIR}"
+  PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_DIR}" \
+    conda run -n "${CONDA_ENV_NAME}" python -m playwright install firefox chromium
 
   printf '%s\n' "${CONDA_ENV_NAME}" > "${CONDA_ENV_FILE}"
   log "Saved conda environment name: ${CONDA_ENV_NAME}"

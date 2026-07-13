@@ -34,6 +34,38 @@ class KorailError(RuntimeError):
         self.code: str | None = code
 
 
+def _raise_for_api_failure(data: dict[str, object]) -> None:
+    result = str(data.get("strResult", ""))
+    err_code = str(
+        data.get("h_msg_cd")
+        or data.get("errCode")
+        or data.get("code")
+        or data.get("dynaPathResultCode")
+        or ""
+    )
+    err_message = str(
+        data.get("h_msg_txt")
+        or data.get("errMsg")
+        or data.get("message")
+        or data.get("errEngMsg")
+        or ""
+    )
+    dyna_path_code = str(data.get("dynaPathResultCode", ""))
+
+    if (
+        result == "FAIL"
+        or bool(data.get("errCode"))
+        or dyna_path_code not in {"", "0"}
+        or (not result and bool(data.get("errMsg")))
+    ):
+        raise KorailError(err_message or "Korail API failed", err_code)
+
+
+def _is_no_direct_schedule_error(exc: KorailError) -> bool:
+    message = "".join(str(exc).split())
+    return "직통열차는없지만,환승으로조회가능합니다" in message
+
+
 @dataclass(slots=True)
 class Train:
     train_no: str
@@ -572,18 +604,16 @@ class KorailAPI:
 
         data = cast(dict[str, object], raw_data)
 
-        if str(data.get("strResult", "")) == "FAIL":
-            raise KorailError(
-                str(
-                    data.get("h_msg_txt") or data.get("message") or "Korail API failed"
-                ),
-                str(data.get("h_msg_cd") or data.get("code") or ""),
-            )
+        _raise_for_api_failure(data)
 
         return data
 
     def login_manual(
-        self, timeout_s: int = 300, *, open_login_page: bool = True
+        self,
+        timeout_s: int = 300,
+        *,
+        open_login_page: bool = True,
+        touch_password_on_comm_error: bool = True,
     ) -> bool:
         """Navigate to login page and wait for user to log in manually.
 
@@ -613,7 +643,7 @@ class KorailAPI:
                 _ = self.page.goto(LOGIN_URL, wait_until="networkidle")
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
-                if comm_error_seen:
+                if comm_error_seen and touch_password_on_comm_error:
                     comm_error_seen = False
                     try:
                         pw_input = self.page.locator("input#password")
@@ -622,6 +652,8 @@ class KorailAPI:
                             self.page.wait_for_timeout(350)
                     except Exception:
                         pass
+                elif comm_error_seen:
+                    comm_error_seen = False
 
                 if self.wait_for_login_stable(
                     timeout_s=0.6,
@@ -1085,7 +1117,14 @@ class KorailAPI:
                 "txtTrnGpCd": train_code,
                 "searchType": "GENERAL",
             }
-            data = self._api_call(API_SCHEDULE, params)
+            try:
+                data = self._api_call(API_SCHEDULE, params)
+            except KorailError as exc:
+                # Korail reports an unavailable train class as FAIL even when
+                # other requested classes have valid direct trains.
+                if _is_no_direct_schedule_error(exc):
+                    continue
+                raise
             for train in self._trains_from_schedule_payload(data):
                 if not self._matches_requested_train_types(train, train_types):
                     continue
@@ -1177,24 +1216,20 @@ class KorailAPI:
             return False
 
         # loginCheck returns strResult=SUCC even when NOT logged in.
-        # Must check h_msg_txt to distinguish.
+        # Must require a member identity or explicit login flag; bare SUCC only
+        # means the loginCheck request itself succeeded.
         msg = str(data.get("h_msg_txt", "")).strip()
         if "로그인 정보가 없습니다" in msg or "로그인" in msg and "없" in msg:
             return False
 
-        # Positive indicators
-        if data.get("strResult") in {"SUCC", "SUCCESS", "Y"}:
-            # Double-check: presence of member credentials confirms login
-            for key in ("strMbCrdNo", "strCustNm", "mbCrdNo"):
-                value = str(data.get(key, "")).strip()
-                if value and value not in {"N", "FALSE", "0"}:
-                    return True
-            # strResult=SUCC without negative msg — likely logged in
-            return True
+        for key in ("strMbCrdNo", "strCustNm", "mbCrdNo", "strCustNo", "custNo"):
+            value = str(data.get(key, "")).strip()
+            if value and value.upper() not in {"N", "FALSE", "0"}:
+                return True
 
-        for key in ("loginYn", "isLogin"):
+        for key in ("loginYn", "isLogin", "strLoginYn"):
             value = str(data.get(key, "")).strip().upper()
-            if value and value not in {"N", "FALSE", "0"}:
+            if value in {"Y", "YES", "TRUE", "1"}:
                 return True
         return False
 
@@ -1231,8 +1266,6 @@ class KorailAPI:
                 break
 
         if not any((member_no, name, login_id)):
-            if data.get("strResult") in {"SUCC", "SUCCESS", "Y"}:
-                return {"member_no": "", "name": "", "login_id": ""}
             return None
 
         return {

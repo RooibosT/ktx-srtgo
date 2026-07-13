@@ -5,17 +5,23 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHOICE_FILE="${ROOT_DIR}/.install_manager"
 CONDA_ENV_FILE="${ROOT_DIR}/.install_conda_env"
 DEFAULT_CONDA_ENV="srtgo-env"
+PROJECT_PLAYWRIGHT_BROWSERS="${ROOT_DIR}/.cache/ms-playwright"
 MANAGER=""
 TARGET=""
+TARGET_ARGS=()
 
 usage() {
   cat <<'EOF'
-Usage: ./run.sh [options]
+Usage: ./run.sh [options] [target options]
 
 Options:
   --ktx          Run KTXgo directly
   --srt          Run SRTgo directly
   -h, --help     Show this help
+
+Examples:
+  ./run.sh --ktx --no-headless
+  ./run.sh --ktx --force-relogin
 EOF
 }
 
@@ -176,10 +182,11 @@ run_target() {
   cd "${ROOT_DIR}"
   case "${TARGET}" in
     ktx)
-      exec python -m ktxgo
+      # Bash 3.2 treats an empty array as unset when nounset is enabled.
+      exec python -m ktxgo ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"}
       ;;
     srt)
-      exec env SRTGO_RAIL_TYPE="SRT" srtgo
+      exec env SRTGO_RAIL_TYPE="SRT" srtgo ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"}
       ;;
     *)
       fail "Unknown target: ${TARGET}"
@@ -203,13 +210,26 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
+    --)
+      shift
+      TARGET_ARGS+=("$@")
+      break
+      ;;
     *)
-      fail "Unknown option: $1 (use --help)"
+      if [[ -n "${TARGET}" ]]; then
+        TARGET_ARGS+=("$1")
+        shift
+      else
+        fail "Unknown option before target selection: $1 (use --help)"
+      fi
       ;;
   esac
 done
 
 load_manager
+if [[ -d "${PROJECT_PLAYWRIGHT_BROWSERS}" ]]; then
+  export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${PROJECT_PLAYWRIGHT_BROWSERS}}"
+fi
 case "${MANAGER}" in
   uv) activate_uv ;;
   conda) activate_conda ;;

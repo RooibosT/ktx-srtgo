@@ -24,6 +24,7 @@ dependencies = [
     "PyCryptodome",
     "prompt_toolkit>=3",
     "python-telegram-bot",
+    "playwright==1.42.0",
     "termcolor"
 ]
 dynamic = ["version"]

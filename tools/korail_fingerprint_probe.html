@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>KTXgo Browser Fingerprint Probe</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; line-height: 1.5; }
+    button { font-size: 1rem; padding: 0.5rem 0.75rem; }
+    pre { background: #111; color: #eee; padding: 1rem; overflow: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>KTXgo Browser Fingerprint Probe</h1>
+  <p>Open this file in a normal browser fresh profile, click copy, and share the JSON after removing anything sensitive.</p>
+  <button id="copy">Copy JSON</button>
+  <pre id="output">Loading...</pre>
+  <script>
+    async function permissionState(name) {
+      try {
+        if (!navigator.permissions || !navigator.permissions.query) return null;
+        return (await navigator.permissions.query({ name })).state;
+      } catch (error) {
+        return `error:${String(error)}`;
+      }
+    }
+
+    function webglInfo() {
+      try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (!gl) return null;
+        const ext = gl.getExtension('WEBGL_debug_renderer_info');
+        return {
+          vendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+          renderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+        };
+      } catch (error) {
+        return { error: String(error) };
+      }
+    }
+
+    async function snapshot() {
+      return {
+        url: location.href,
+        title: document.title,
+        webdriver: navigator.webdriver,
+        userAgent: navigator.userAgent,
+        platform: navigator.platform,
+        languages: navigator.languages,
+        language: navigator.language,
+        cookieEnabled: navigator.cookieEnabled,
+        hardwareConcurrency: navigator.hardwareConcurrency,
+        deviceMemory: navigator.deviceMemory ?? null,
+        maxTouchPoints: navigator.maxTouchPoints,
+        pluginsLength: navigator.plugins.length,
+        mimeTypesLength: navigator.mimeTypes.length,
+        screen: {
+          width: screen.width,
+          height: screen.height,
+          availWidth: screen.availWidth,
+          availHeight: screen.availHeight,
+          colorDepth: screen.colorDepth,
+          pixelDepth: screen.pixelDepth,
+        },
+        viewport: {
+          innerWidth,
+          innerHeight,
+          outerWidth,
+          outerHeight,
+          devicePixelRatio,
+        },
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        permissions: {
+          notifications: await permissionState('notifications'),
+          geolocation: await permissionState('geolocation'),
+          camera: await permissionState('camera'),
+          microphone: await permissionState('microphone'),
+        },
+        webgl: webglInfo(),
+      };
+    }
+
+    async function render() {
+      const data = await snapshot();
+      document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+    }
+
+    document.getElementById('copy').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(document.getElementById('output').textContent);
+    });
+
+    render();
+  </script>
+</body>
+</html>
