@@ -10,7 +10,8 @@ from ktxgo.korail import KorailAPI, KorailError, Train
 
 
 class _DummyManager:
-    def __init__(self, headless: bool):
+    def __init__(self, headless: bool, use_saved_session: bool = True, **kwargs):
+        del headless, use_saved_session, kwargs
         self.page = object()
 
     def __enter__(self) -> _DummyManager:
@@ -49,9 +50,43 @@ def _make_waitlist_train() -> Train:
     )
 
 
+def _make_unavailable_train() -> Train:
+    return Train.from_schedule(
+        {
+            "h_trn_no": "00456",
+            "h_car_tp_nm": "KTX",
+            "h_trn_clsf_nm": "KTX",
+            "h_trn_gp_nm": "KTX",
+            "h_dpt_rs_stn_nm": "서울",
+            "h_arv_rs_stn_nm": "부산",
+            "h_dpt_tm_qb": "09:10",
+            "h_arv_tm_qb": "11:59",
+            "h_dpt_dt": "20260320",
+            "h_gen_rsv_nm": "매진",
+            "h_gen_rsv_cd": "13",
+            "h_spe_rsv_nm": "매진",
+            "h_spe_rsv_cd": "13",
+            "h_stnd_rsv_nm": "없음",
+            "h_stnd_rsv_cd": "13",
+            "h_wait_rsv_nm": "불가",
+            "h_wait_rsv_cd": "13",
+            "h_rcvd_amt": "0059800",
+            "h_trn_clsf_cd": "100",
+            "h_trn_gp_cd": "100",
+            "h_dpt_rs_stn_cd": "0001",
+            "h_arv_rs_stn_cd": "0020",
+            "h_run_dt": "20260320",
+        }
+    )
+
+
 def _patch_cli_runtime(monkeypatch) -> None:
     monkeypatch.setattr(cli, "BrowserManager", _DummyManager)
-    monkeypatch.setattr(cli, "_ensure_login", lambda api, manager, headless: api)
+    monkeypatch.setattr(
+        cli,
+        "_ensure_login",
+        lambda api, manager, headless, **kwargs: api,
+    )
     monkeypatch.setattr(cli.time, "sleep", lambda _: None)
     monkeypatch.setattr(cli.signal, "signal", lambda *args, **kwargs: None)
 
@@ -155,6 +190,21 @@ def test_interactive_menu_dispatches_waitlist_alert_setting(monkeypatch) -> None
             time_str="07",
             adults=1,
             headless=True,
+            manual_login_only=False,
+            force_relogin=False,
+            pure_login_window=False,
+            pure_login_stealth=False,
+            webdriver_mode="default",
+            browser_name="firefox",
+            browser_channel=None,
+            browser_executable=None,
+            browser_profile_dir=None,
+            browser_locale="ko-KR",
+            browser_user_agent=None,
+            viewport_size=None,
+            screen_size=None,
+            device_scale_factor=None,
+            login_debug_dir=None,
             interactive=True,
             max_attempts=1,
             train_types=("ktx",),
@@ -202,6 +252,8 @@ def test_cli_registers_waitlist_alert_after_waitlist_success(monkeypatch) -> Non
     result = runner.invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -245,6 +297,8 @@ def test_cli_keeps_waitlist_success_when_alert_registration_fails(monkeypatch) -
     result = runner.invoke(
         cli.main,
         [
+            "--api-backend",
+            "playwright",
             "--no-interactive",
             "--max-attempts",
             "1",
@@ -256,6 +310,160 @@ def test_cli_keeps_waitlist_success_when_alert_registration_fails(monkeypatch) -
     assert result.exit_code == 0
     assert "예약대기 신청완료" in result.output
     assert "alert registration failed" in result.output
+
+
+def test_reservation_loop_keeps_login_alive_between_search_attempts(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    train = _make_waitlist_train()
+
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.search_count = 0
+
+        def search(self, *args, **kwargs) -> list[Train]:
+            del args, kwargs
+            self.search_count += 1
+            events.append(f"search:{self.search_count}")
+            if self.search_count == 1:
+                return []
+            return [train]
+
+        def is_logged_in(self) -> bool:
+            events.append("keepalive")
+            return True
+
+        def reserve(
+            self,
+            train: Train,
+            seat_type: str = "general",
+            adults: int = 1,
+            waitlist: bool = False,
+        ) -> dict[str, object]:
+            del train, seat_type, adults
+            assert waitlist is True
+            events.append("reserve")
+            return {"h_pnr_no": "PNR123", "strResult": "SUCC"}
+
+        def set_waitlist_alert(self, pnr_no: str, phone: str) -> dict[str, object]:
+            raise AssertionError("phone is not configured in this test")
+
+    monkeypatch.setattr(cli, "_LOGIN_KEEPALIVE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(cli.keyring, "get_password", lambda service, key: None)
+
+    cli._run_reservation_loop(
+        DummyAPI(),  # type: ignore[arg-type]
+        reauthenticate=lambda api, stage: api,
+        interactive_mode=False,
+        departure="서울",
+        arrival="부산",
+        date="20260320",
+        time_str="07",
+        adults=1,
+        train_types=("ktx",),
+        seat="any",
+        auto_pay=False,
+        smart_ticket=True,
+        telegram=False,
+        waitlist_alert_phone=None,
+        max_attempts=2,
+    )
+
+    assert events == ["search:1", "keepalive", "search:2", "reserve"]
+
+
+def test_reservation_loop_does_not_reauthenticate_on_single_keepalive_miss(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+
+    class DummyAPI:
+        def __init__(self) -> None:
+            self.search_count = 0
+
+        def search(self, *args, **kwargs) -> list[Train]:
+            del args, kwargs
+            self.search_count += 1
+            events.append(f"search:{self.search_count}")
+            return []
+
+        def is_logged_in(self) -> bool:
+            events.append("keepalive:false")
+            return False
+
+    def fail_reauthenticate(api: object, stage: str) -> object:
+        raise AssertionError(f"single keepalive miss must not reauthenticate: {stage}")
+
+    monkeypatch.setattr(cli, "_LOGIN_KEEPALIVE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(cli, "_LOGIN_KEEPALIVE_FAILURES_BEFORE_REAUTH", 2)
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    cli._run_reservation_loop(
+        DummyAPI(),  # type: ignore[arg-type]
+        reauthenticate=fail_reauthenticate,  # type: ignore[arg-type]
+        interactive_mode=False,
+        departure="서울",
+        arrival="부산",
+        date="20260320",
+        time_str="07",
+        adults=1,
+        train_types=("ktx",),
+        seat="any",
+        auto_pay=False,
+        smart_ticket=True,
+        telegram=False,
+        waitlist_alert_phone=None,
+        max_attempts=1,
+    )
+
+    assert events == ["search:1", "keepalive:false"]
+
+
+def test_reservation_loop_repeats_attempts_without_printing_train_results(
+    monkeypatch,
+) -> None:
+    train = _make_unavailable_train()
+    messages: list[str] = []
+
+    class DummyAPI:
+        def search(self, *args, **kwargs) -> list[Train]:
+            del args, kwargs
+            return [train]
+
+        def is_logged_in(self) -> bool:
+            return True
+
+    monkeypatch.setattr(
+        cli.click, "echo", lambda message="": messages.append(str(message))
+    )
+    monkeypatch.setattr(cli.time, "sleep", lambda seconds: None)
+
+    cli._run_reservation_loop(
+        DummyAPI(),  # type: ignore[arg-type]
+        reauthenticate=lambda api, stage: api,
+        interactive_mode=False,
+        departure="서울",
+        arrival="부산",
+        date="20260320",
+        time_str="07",
+        adults=1,
+        train_types=("ktx",),
+        seat="any",
+        auto_pay=False,
+        smart_ticket=True,
+        telegram=False,
+        waitlist_alert_phone=None,
+        max_attempts=2,
+    )
+
+    output = "\n".join(messages)
+
+    assert "Attempt 1" in output
+    assert "Attempt 2" in output
+    assert "idx train" not in output
+    assert "00456" not in output
 
 
 def test_load_saved_interactive_defaults_sanitizes_invalid_values(monkeypatch) -> None:
@@ -561,6 +769,21 @@ def test_main_persists_auto_pay_false_after_card_check_fallback(monkeypatch) -> 
         time_str="07",
         adults=1,
         headless=True,
+        manual_login_only=False,
+        force_relogin=False,
+        pure_login_window=False,
+        pure_login_stealth=False,
+        webdriver_mode="default",
+        browser_name="firefox",
+        browser_channel=None,
+        browser_executable=None,
+        browser_profile_dir=None,
+        browser_locale="ko-KR",
+        browser_user_agent=None,
+        viewport_size=None,
+        screen_size=None,
+        device_scale_factor=None,
+        login_debug_dir=None,
         interactive=True,
         max_attempts=1,
         train_types=("ktx",),
@@ -570,6 +793,7 @@ def test_main_persists_auto_pay_false_after_card_check_fallback(monkeypatch) -> 
         smart_ticket=True,
         telegram=False,
         waitlist_alert_phone=None,
+        api_backend="playwright",
     )
 
     assert ("KTX", "auto_pay", "0") in stored
@@ -609,7 +833,12 @@ def test_ensure_login_uses_updated_assisted_login_text(monkeypatch) -> None:
     monkeypatch.setattr(cli, "colored", lambda text, *args, **kwargs: text)
     monkeypatch.setattr(cli.click, "echo", lambda message="": messages.append(str(message)))
 
-    result = cli._ensure_login(DummyAPI(), DummyManager(), headless=False)
+    result = cli._ensure_login(
+        DummyAPI(),
+        DummyManager(),
+        headless=False,
+        use_external_firefox_login=False,
+    )
 
     assert isinstance(result, DummyAPI)
     assert "[로그인 필요] 자동으로 접속된 브라우저에서 로그인 버튼을 직접 눌러주세요" in messages
